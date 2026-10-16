@@ -32,15 +32,26 @@ jobs:
         run: |
           set -euo pipefail
           SDK_MANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          # yes can receive SIGPIPE after sdkmanager closes stdin; do not let pipefail fail this step.
+          set +e +o pipefail
           yes | "$SDK_MANAGER" --licenses >/dev/null
-          yes | "$SDK_MANAGER" "platforms;android-34" "build-tools;34.0.0" >/dev/null
+          LICENSE_STATUS=${PIPESTATUS[1]}
+          set -e -o pipefail
+          if [ "$LICENSE_STATUS" -ne 0 ]; then
+            exit "$LICENSE_STATUS"
+          fi
+
+          # Do not use yes here: licenses are already accepted, and this must fail if install fails.
+          "$SDK_MANAGER" "platforms;android-34" "build-tools;34.0.0" >/dev/null
 
       - name: Verify tool versions
         run: |
           set -euo pipefail
           java -version
           gradle --version
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --list_installed | sed -n '1,80p'
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --list_installed >/tmp/sdkmanager-installed.txt
+          sed -n '1,80p' /tmp/sdkmanager-installed.txt
 
       - name: Assemble debug APK
         run: gradle :app:assembleDebug --stacktrace
@@ -52,3 +63,4 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
+
