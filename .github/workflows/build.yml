@@ -56,6 +56,24 @@ jobs:
       - name: Assemble debug APK
         run: gradle :app:assembleDebug --stacktrace
 
+      - name: Verify APK signature, badging, manifest tree, and size
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_PATH="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -n "$APK_PATH"
+          BUILD_TOOLS_DIR="$ANDROID_HOME/build-tools/34.0.0"
+          AAPT2="$BUILD_TOOLS_DIR/aapt2"
+          APKSIGNER="$BUILD_TOOLS_DIR/apksigner"
+
+          echo "APK_PATH=$APK_PATH"
+          wc -c < "$APK_PATH" | awk '{print "APK_SIZE_BYTES=" $1}'
+          ls -lh "$APK_PATH"
+
+          "$APKSIGNER" verify --verbose --print-certs "$APK_PATH"
+          "$AAPT2" dump badging "$APK_PATH"
+          "$AAPT2" dump xmltree "$APK_PATH" --file AndroidManifest.xml
+
       - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:

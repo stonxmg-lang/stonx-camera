@@ -14,10 +14,20 @@ android {
         versionName '0.1.0-stage1'
     }
 
+    signingConfigs {
+        debug {
+            storeFile rootProject.file('keystores/stonx-debug.keystore')
+            storePassword 'stonxdebug'
+            keyAlias 'stonxdebug'
+            keyPassword 'stonxdebug'
+        }
+    }
+
     buildTypes {
         debug {
             minifyEnabled false
             debuggable true
+            signingConfig signingConfigs.debug
         }
         release {
             minifyEnabled true
@@ -35,3 +45,4 @@ android {
 dependencies {
     // Stage 1 intentionally has no runtime dependencies.
 }
+
