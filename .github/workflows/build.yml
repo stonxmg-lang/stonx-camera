@@ -1,0 +1,54 @@
+name: Build STONX Camera Bridge APK
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-debug-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Gradle 8.7 without wrapper jar
+        run: |
+          set -euo pipefail
+          GRADLE_VERSION=8.7
+          curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d /tmp
+          echo "/tmp/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Ensure Android SDK components used by this project
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_MANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDK_MANAGER" --licenses >/dev/null
+          yes | "$SDK_MANAGER" "platforms;android-34" "build-tools;34.0.0" >/dev/null
+
+      - name: Verify tool versions
+        run: |
+          set -euo pipefail
+          java -version
+          gradle --version
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --list_installed | sed -n '1,80p'
+
+      - name: Assemble debug APK
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stonx-camera-bridge-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
