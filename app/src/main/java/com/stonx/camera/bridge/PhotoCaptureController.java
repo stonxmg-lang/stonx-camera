@@ -101,7 +101,7 @@ final class PhotoCaptureController {
                 return;
             }
             long elapsed = SystemClock.elapsedRealtime() - threeAStartMs;
-            if ((threeASettled(lastAeState) && threeASettled(lastAfState)) || elapsed >= THREE_A_WAIT_TIMEOUT_MS) {
+            if ((aeSettled(lastAeState) && afSettled(lastAfState)) || elapsed >= THREE_A_WAIT_TIMEOUT_MS) {
                 captureStill();
             } else {
                 handler.postDelayed(this, 100L);
@@ -283,17 +283,21 @@ final class PhotoCaptureController {
         }
     };
 
-    private boolean threeASettled(Integer state) {
+    private boolean aeSettled(Integer state) {
         if (state == null) {
             return false;
         }
         return state == CaptureResult.CONTROL_AE_STATE_CONVERGED
-                || state == CaptureResult.CONTROL_AE_STATE_LOCKED
-                || state == CaptureResult.CONTROL_AE_STATE_INACTIVE
-                || state == CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED
-                || state == CaptureResult.CONTROL_AF_STATE_CONVERGED
-                || state == CaptureResult.CONTROL_AF_STATE_LOCKED
-                || state == CaptureResult.CONTROL_AF_STATE_INACTIVE;
+                || state == CaptureResult.CONTROL_AE_STATE_LOCKED;
+    }
+
+    private boolean afSettled(Integer state) {
+        if (state == null) {
+            return false;
+        }
+        return state == CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED
+                || state == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED
+                || state == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED;
     }
 
     private void captureStill() {
