@@ -1,10 +1,10 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # STONX Camera Bridge - Termux control script
-# Stage 3: command skeleton, shared-status runner, status/permission only.
+# Stage 3 fix: do not use pm visibility as an install check; decide helper callability from am start + status file.
 
 set -u
 
-readonly STONX_VERSION="0.1.0-stage3"
+readonly STONX_VERSION="0.1.0-stage3.1"
 readonly STONX_APP_ID="com.stonx.camera.bridge"
 readonly STONX_ACTIVITY="$STONX_APP_ID/.CaptureActivity"
 
@@ -47,7 +47,7 @@ Exit codes:
   0 success
   2 usage/validation error
   3 missing Termux dependency
-  4 helper APK missing/not callable
+  4 helper APK component not installed or not callable
   5 helper failed or timed out
   6 shared storage self-test failed
   9 command exists but is not enabled yet
@@ -132,6 +132,20 @@ self_test_shared_inbox() {
   return 0
 }
 
+am_output_has_helper_call_failure() {
+  local file="$1"
+  grep -Eiq \
+    'Error:[[:space:]]+Activity class .*does not exist|Error type 3|Activity not started' \
+    "$file" 2>/dev/null
+}
+
+first_am_output_line() {
+  local file="$1"
+  local line
+  line="$(grep -Eiv '^[[:space:]]*$' "$file" 2>/dev/null | head -n 1)"
+  printf '%s' "${line:-empty-am-output}"
+}
+
 run_helper() {
   local type="$1"
   local face="$2"
@@ -139,7 +153,11 @@ run_helper() {
   local request_id="$4"
   local timeout_secs="${5:-25}"
 
-  local status_file="$STONX_SHARED_INBOX/$request_id.json"
+  # Stage 2 helper writes status JSON to this fixed inbox. Keep output_dir explicit and equal to it for now.
+  local status_inbox="$STONX_SHARED_INBOX"
+  local status_file="$status_inbox/$request_id.json"
+  local am_out="$STONX_TMP/am-$request_id.log"
+  local am_rc
   local reason
   local path
   local deadline
@@ -149,28 +167,33 @@ run_helper() {
     log_line "RUN request=$request_id type=$type result=dependency_missing command=am"
     return "$STONX_DEP"
   fi
-  if ! command -v pm >/dev/null 2>&1; then
-    err "Termux dependency missing: pm"
-    log_line "RUN request=$request_id type=$type result=dependency_missing command=pm"
-    return "$STONX_DEP"
-  fi
-  if ! pm path "$STONX_APP_ID" >/dev/null 2>&1; then
-    err "helper APK not installed: $STONX_APP_ID"
-    log_line "RUN request=$request_id type=$type result=helper_missing"
-    return "$STONX_HELPER"
+  if ! ensure_dirs; then
+    err "cannot create Termux work directories"
+    log_line "RUN request=$request_id type=$type result=termux_dirs_failed"
+    return "$STONX_STORAGE"
   fi
 
-  log_line "RUN request=$request_id type=$type face=$face duration=$duration timeout=$timeout_secs"
+  log_line "RUN request=$request_id type=$type face=$face duration=$duration timeout=$timeout_secs output_dir=$status_inbox"
 
-  if ! am start \
+  : > "$am_out" 2>/dev/null || true
+  am start \
       -n "$STONX_ACTIVITY" \
       --es type "$type" \
       --es face "$face" \
       --ei duration_seconds "$duration" \
-      --es output_dir "$STONX_SHARED_OUT" \
-      --es request_id "$request_id" >/dev/null 2>&1; then
-    err "failed to start helper activity"
-    log_line "RUN request=$request_id type=$type result=start_failed"
+      --es output_dir "$status_inbox" \
+      --es request_id "$request_id" > "$am_out" 2>&1
+  am_rc=$?
+
+  if am_output_has_helper_call_failure "$am_out"; then
+    err "helper component not installed or not callable: $(first_am_output_line "$am_out")"
+    log_line "RUN request=$request_id type=$type result=helper_not_callable am_rc=$am_rc am_output=$(first_am_output_line "$am_out")"
+    return "$STONX_HELPER"
+  fi
+
+  if (( am_rc != 0 )); then
+    err "am start failed (rc=$am_rc): $(first_am_output_line "$am_out")"
+    log_line "RUN request=$request_id type=$type result=am_start_failed am_rc=$am_rc am_output=$(first_am_output_line "$am_out")"
     return "$STONX_FAILED"
   fi
 
@@ -203,8 +226,8 @@ cmd_status() {
   require_no_args "$@"
   ensure_dirs || die "cannot create $STONX_BASE" "$STONX_STORAGE"
 
-  local helper_installed="no"
   local am_present="no"
+  local pm_visibility="unknown"
   local shared_ok="no"
   local request_id
   local helper_rc=0
@@ -213,7 +236,9 @@ cmd_status() {
     am_present="yes"
   fi
   if command -v pm >/dev/null 2>&1 && pm path "$STONX_APP_ID" >/dev/null 2>&1; then
-    helper_installed="yes"
+    pm_visibility="visible"
+  else
+    pm_visibility="unknown (package visibility is not decisive)"
   fi
   if self_test_shared_inbox; then
     shared_ok="yes"
@@ -229,7 +254,8 @@ cmd_status() {
   printf 'shared_inbox: %s\n' "$STONX_SHARED_INBOX"
   printf 'shared_out: %s\n' "$STONX_SHARED_OUT"
   printf 'am_present: %s\n' "$am_present"
-  printf 'helper_installed: %s\n' "$helper_installed"
+  printf 'helper_pm_visibility: %s\n' "$pm_visibility"
+  printf 'helper_callability: decided by am start + status file\n'
   printf 'shared_self_test: %s\n' "$shared_ok"
 
   if [[ "$shared_ok" != "yes" ]]; then
