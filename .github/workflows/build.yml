@@ -109,67 +109,132 @@ jobs:
           badging = subprocess.check_output([aapt2, 'dump', 'badging', apk], text=True)
           xml = subprocess.check_output([aapt2, 'dump', 'xmltree', apk, '--file', 'AndroidManifest.xml'], text=True)
 
+
           def fail(msg):
               print('MANIFEST_POLICY_FAIL:', msg)
               sys.exit(1)
 
+
           def leading_spaces(line):
               return len(line) - len(line.lstrip(' '))
 
-          def component_block(text, marker):
+
+          def element_blocks(text, marker):
               lines = text.splitlines()
-              start = None
-              start_indent = 0
-              for idx, line in enumerate(lines):
-                  stripped = line.lstrip()
-                  if stripped.startswith(marker + ' '):
-                      start = idx
-                      start_indent = leading_spaces(line)
-                      break
-              if start is None:
-                  return ''
-              end = len(lines)
-              for idx in range(start + 1, len(lines)):
-                  stripped = lines[idx].lstrip()
-                  if stripped.startswith('E: ') and leading_spaces(lines[idx]) <= start_indent:
-                      end = idx
-                      break
-              return '\n'.join(lines[start:end])
+              out = []
+              i = 0
+              while i < len(lines):
+                  if lines[i].lstrip().startswith(marker + ' '):
+                      start_indent = leading_spaces(lines[i])
+                      j = i + 1
+                      while j < len(lines):
+                          stripped = lines[j].lstrip()
+                          if stripped.startswith('E: ') and leading_spaces(lines[j]) <= start_indent:
+                              break
+                          j += 1
+                      out.append('\n'.join(lines[i:j]))
+                      i = j
+                  else:
+                      i += 1
+              return out
+
 
           def attr_bool(block, attr, expected):
-              attr_re = re.escape(attr) + r'[^\n]*'
-              if expected == 'true':
-                  pattern = attr_re + r'(?:="true"|\(type\s+0x12\)\s*0xffffffff)'
-              elif expected == 'false':
-                  pattern = attr_re + r'(?:="false"|\(type\s+0x12\)\s*0x0)(?![0-9A-Fa-f])'
-              else:
-                  raise ValueError(expected)
-              return re.search(pattern, block) is not None
+              m = re.search(
+                  re.escape(attr) +
+                  r'(?:\([^)]*\))?\s*=\s*(?:"(true|false)"|(true|false)|(?:\(type\s+0x[0-9A-Fa-f]+\)\s*)?(0x[0-9A-Fa-f]+))',
+                  block
+              )
+              if not m:
+                  return False
+              word = m.group(1) or m.group(2)
+              if word is not None:
+                  return word == expected
+              value = int(m.group(3), 16)
+              return value == (0xFFFFFFFF if expected == 'true' else 0)
 
-          activity_block = component_block(xml, 'E: activity')
-          service_block = component_block(xml, 'E: service')
+          def foreground_service_mask(block):
+              m = re.search(
+                  re.escape('android:foregroundServiceType') +
+                  r'(?:\([^)]*\))?\s*=\s*(?:\(type\s+0x[0-9A-Fa-f]+\)\s*)?(0x[0-9A-Fa-f]+)',
+                  block
+              )
+              if not m:
+                  return None
+              return int(m.group(1), 16)
 
-          print('--- AAPT2 ACTIVITY BLOCK ---')
-          print(activity_block if activity_block else '<missing>')
-          print('--- AAPT2 SERVICE BLOCK ---')
-          print(service_block if service_block else '<missing>')
 
-          if not activity_block:
-              fail('CaptureActivity block missing from aapt2 xmltree')
-          if not service_block:
-              fail('RecordingForegroundService block missing from aapt2 xmltree')
+          def has_precise_launcher(text):
+              filters = element_blocks(text, 'E: intent-filter')
+              for block in filters:
+                  has_main = re.search(
+                      r'android:name(?:\([^)]*\))?\s*=\s*"android\.intent\.action\.MAIN"',
+                      block
+                  ) is not None
+                  has_launcher = re.search(
+                      r'android:name(?:\([^)]*\))?\s*=\s*"android\.intent\.category\.LAUNCHER"',
+                      block
+                  ) is not None
+                  if has_main and has_launcher:
+                      return True
+              return False
+
+
+          activity_blocks = element_blocks(xml, 'E: activity')
+          service_blocks = element_blocks(xml, 'E: service')
+
+          print('--- AAPT2 ACTIVITY BLOCKS ---')
+          for idx, block in enumerate(activity_blocks, 1):
+              print('--- activity %d ---' % idx)
+              print(block)
+          if not activity_blocks:
+              print('<missing>')
+
+          print('--- AAPT2 SERVICE BLOCKS ---')
+          for idx, block in enumerate(service_blocks, 1):
+              print('--- service %d ---' % idx)
+              print(block)
+          if not service_blocks:
+              print('<missing>')
+
+          print('--- AAPT2 INTENT-FILTER BLOCKS ---')
+          filters = element_blocks(xml, 'E: intent-filter')
+          for idx, block in enumerate(filters, 1):
+              print('--- intent-filter %d ---' % idx)
+              print(block)
+          if not filters:
+              print('<none>')
+
+          if len(activity_blocks) != 1:
+              fail('expected exactly one activity block, found %d' % len(activity_blocks))
+          if len(service_blocks) != 1:
+              fail('expected exactly one service block, found %d' % len(service_blocks))
+
+          activity_block = activity_blocks[0]
+          service_block = service_blocks[0]
+
           if 'CaptureActivity' not in activity_block:
               fail('CaptureActivity name missing')
           if not attr_bool(activity_block, 'android:exported', 'true'):
-              fail('CaptureActivity exported=true not found in aapt2 boolean form')
-          if 'MAIN' in xml or 'LAUNCHER' in xml:
+              fail('CaptureActivity exported=true not found in any supported aapt2 boolean form')
+          if has_precise_launcher(xml):
               fail('launcher MAIN/LAUNCHER intent-filter is present')
+
           if 'RecordingForegroundService' not in service_block:
               fail('RecordingForegroundService name missing')
           if not attr_bool(service_block, 'android:exported', 'false'):
-              fail('service exported=false not found in aapt2 boolean form')
-          if 'camera|microphone' not in service_block:
-              fail('service foregroundServiceType camera|microphone not found')
+              fail('service exported=false not found in any supported aapt2 boolean form')
+
+          mask = foreground_service_mask(service_block)
+          if mask is None:
+              fail('service foregroundServiceType numeric mask not found')
+          print('FOREGROUND_SERVICE_TYPE_MASK=0x%08x' % mask)
+          if (mask & 0x40) == 0:
+              fail('foregroundServiceType missing camera bit 0x40')
+          if (mask & 0x80) == 0:
+              fail('foregroundServiceType missing microphone bit 0x80')
+          if mask != 0xC0:
+              fail('foregroundServiceType has extra or missing types: expected exactly 0x000000c0')
 
           required_permissions = [
               'android.permission.CAMERA',
@@ -180,7 +245,7 @@ jobs:
               'android.permission.FOREGROUND_SERVICE_MICROPHONE',
           ]
           for permission in required_permissions:
-              if "name='%s'" % permission not in badging:
+              if "uses-permission: name='%s'" % permission not in badging:
                   fail('missing permission: ' + permission)
 
           forbidden_permissions = [
@@ -192,7 +257,7 @@ jobs:
               'android.permission.READ_PHONE_STATE',
           ]
           for permission in forbidden_permissions:
-              if permission in badging:
+              if "uses-permission: name='%s'" % permission in badging:
                   fail('forbidden permission present: ' + permission)
 
           print('MANIFEST_POLICY_OK')
@@ -205,4 +270,3 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
-
