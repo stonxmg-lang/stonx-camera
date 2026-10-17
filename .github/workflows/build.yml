@@ -113,17 +113,62 @@ jobs:
               print('MANIFEST_POLICY_FAIL:', msg)
               sys.exit(1)
 
-          if 'android.intent.action.MAIN' in xml and 'android.intent.category.LAUNCHER' in xml:
+          def leading_spaces(line):
+              return len(line) - len(line.lstrip(' '))
+
+          def component_block(text, marker):
+              lines = text.splitlines()
+              start = None
+              start_indent = 0
+              for idx, line in enumerate(lines):
+                  stripped = line.lstrip()
+                  if stripped.startswith(marker + ' '):
+                      start = idx
+                      start_indent = leading_spaces(line)
+                      break
+              if start is None:
+                  return ''
+              end = len(lines)
+              for idx in range(start + 1, len(lines)):
+                  stripped = lines[idx].lstrip()
+                  if stripped.startswith('E: ') and leading_spaces(lines[idx]) <= start_indent:
+                      end = idx
+                      break
+              return '\n'.join(lines[start:end])
+
+          def attr_bool(block, attr, expected):
+              attr_re = re.escape(attr) + r'[^\n]*'
+              if expected == 'true':
+                  pattern = attr_re + r'(?:="true"|\(type\s+0x12\)\s*0xffffffff)'
+              elif expected == 'false':
+                  pattern = attr_re + r'(?:="false"|\(type\s+0x12\)\s*0x0)(?![0-9A-Fa-f])'
+              else:
+                  raise ValueError(expected)
+              return re.search(pattern, block) is not None
+
+          activity_block = component_block(xml, 'E: activity')
+          service_block = component_block(xml, 'E: service')
+
+          print('--- AAPT2 ACTIVITY BLOCK ---')
+          print(activity_block if activity_block else '<missing>')
+          print('--- AAPT2 SERVICE BLOCK ---')
+          print(service_block if service_block else '<missing>')
+
+          if not activity_block:
+              fail('CaptureActivity block missing from aapt2 xmltree')
+          if not service_block:
+              fail('RecordingForegroundService block missing from aapt2 xmltree')
+          if 'CaptureActivity' not in activity_block:
+              fail('CaptureActivity name missing')
+          if not attr_bool(activity_block, 'android:exported', 'true'):
+              fail('CaptureActivity exported=true not found in aapt2 boolean form')
+          if 'MAIN' in xml or 'LAUNCHER' in xml:
               fail('launcher MAIN/LAUNCHER intent-filter is present')
-          if 'CaptureActivity' not in xml:
-              fail('CaptureActivity missing')
-          if 'RecordingForegroundService' not in xml:
-              fail('RecordingForegroundService missing')
-          if not re.search(r'android:exported\([^)]*\)="true"', xml):
-              fail('CaptureActivity exported=true not found')
-          if not re.search(r'android:exported\([^)]*\)="false"', xml):
-              fail('service exported=false not found')
-          if 'camera|microphone' not in xml:
+          if 'RecordingForegroundService' not in service_block:
+              fail('RecordingForegroundService name missing')
+          if not attr_bool(service_block, 'android:exported', 'false'):
+              fail('service exported=false not found in aapt2 boolean form')
+          if 'camera|microphone' not in service_block:
               fail('service foregroundServiceType camera|microphone not found')
 
           required_permissions = [
@@ -160,3 +205,4 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
+
