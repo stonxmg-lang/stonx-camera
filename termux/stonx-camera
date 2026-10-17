@@ -4,7 +4,7 @@
 
 set -u
 
-readonly STONX_VERSION="0.2.0-photo1"
+readonly STONX_VERSION="0.2.0-photo2"
 readonly STONX_APP_ID="com.stonx.camera.bridge"
 readonly STONX_ACTIVITY="$STONX_APP_ID/.CaptureActivity"
 
@@ -27,6 +27,7 @@ readonly STONX_HELPER=4
 readonly STONX_FAILED=5
 readonly STONX_STORAGE=6
 readonly STONX_NOT_ENABLED=9
+readonly STONX_LOW_BRIGHTNESS=35
 
 usage() {
   cat <<'EOF'
@@ -250,8 +251,18 @@ run_helper() {
             log_line "RUN request=$request_id type=$type result=failed reason=photo_verification_failed"
             return "$STONX_FAILED"
           fi
-          printf 'RESULT ok request=%s path=%s size=%s sha256=%s\n'             "$request_id" "$VERIFIED_PATH" "$VERIFIED_SIZE" "$VERIFIED_SHA256"
-          log_line "RUN request=$request_id type=$type result=ok path=$VERIFIED_PATH size=$VERIFIED_SIZE sha256=$VERIFIED_SHA256"
+          PHOTO_BRIGHTNESS="$(json_get_long "$status_file" brightness)"
+          PHOTO_AE_STATE="$(json_get_string "$status_file" ae_state)"
+          PHOTO_EXPOSURE_NS="$(json_get_long "$status_file" exposure_ns)"
+          PHOTO_ISO="$(json_get_long "$status_file" iso)"
+          [[ "$PHOTO_BRIGHTNESS" =~ ^[0-9]+$ ]] || PHOTO_BRIGHTNESS=-1
+          printf 'RESULT ok request=%s path=%s size=%s sha256=%s brightness=%s ae_state=%s exposure_ns=%s iso=%s\n' \
+            "$request_id" "$VERIFIED_PATH" "$VERIFIED_SIZE" "$VERIFIED_SHA256" \
+            "$PHOTO_BRIGHTNESS" "$PHOTO_AE_STATE" "$PHOTO_EXPOSURE_NS" "$PHOTO_ISO"
+          if [[ "$PHOTO_BRIGHTNESS" -ge 0 && "$PHOTO_BRIGHTNESS" -lt "$STONX_LOW_BRIGHTNESS" ]]; then
+            printf 'WARNING: low_brightness=%s threshold=%s\n' "$PHOTO_BRIGHTNESS" "$STONX_LOW_BRIGHTNESS" >&2
+          fi
+          log_line "RUN request=$request_id type=$type result=ok path=$VERIFIED_PATH size=$VERIFIED_SIZE sha256=$VERIFIED_SHA256 brightness=$PHOTO_BRIGHTNESS ae_state=$PHOTO_AE_STATE exposure_ns=$PHOTO_EXPOSURE_NS iso=$PHOTO_ISO"
           return "$STONX_OK"
         fi
         path="$(json_get_string "$status_file" path)"

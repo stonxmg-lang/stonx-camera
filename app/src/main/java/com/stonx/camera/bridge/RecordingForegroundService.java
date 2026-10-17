@@ -112,7 +112,13 @@ public class RecordingForegroundService extends Service {
     private void startPhotoCapture(final String requestId, String face) {
         new PhotoCaptureController(this, face, new PhotoCaptureController.Callback() {
             @Override
-            public void onSuccess(String path, long sizeBytes, String sha256) {
+            public void onSuccess(String path,
+                                  long sizeBytes,
+                                  String sha256,
+                                  int brightness,
+                                  String aeState,
+                                  long exposureNs,
+                                  int iso) {
                 Stage2StatusWriter.write(
                         RecordingForegroundService.this,
                         requestId,
@@ -120,7 +126,11 @@ public class RecordingForegroundService extends Service {
                         "photo_ok",
                         path,
                         sizeBytes,
-                        sha256
+                        sha256,
+                        brightness,
+                        aeState,
+                        exposureNs,
+                        iso
                 );
                 sendDone(requestId);
                 removeNotificationAndStop(true);

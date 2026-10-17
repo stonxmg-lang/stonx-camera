@@ -37,6 +37,20 @@ final class Stage2StatusWriter {
                       String path,
                       long sizeBytes,
                       String sha256) {
+        write(context, requestId, ok, reason, path, sizeBytes, sha256, -1, "", -1L, -1);
+    }
+
+    static void write(Context context,
+                      String requestId,
+                      boolean ok,
+                      String reason,
+                      String path,
+                      long sizeBytes,
+                      String sha256,
+                      int brightness,
+                      String aeState,
+                      long exposureNs,
+                      int iso) {
         String originalRequestId = requestId == null ? "" : requestId.trim();
         String safeRequestId = originalRequestId;
         if (safeRequestId.isEmpty()) {
@@ -50,7 +64,18 @@ final class Stage2StatusWriter {
         String relativePath = Environment.DIRECTORY_DOWNLOADS + "/STONX-Camera-Bridge/inbox";
         String sharedPath = "/sdcard/" + relativePath + "/" + displayName;
         String effectivePath = path == null || path.isEmpty() ? sharedPath : path;
-        String json = buildJson(originalRequestId, ok, reason, effectivePath, sizeBytes, sha256);
+        String json = buildJson(
+                originalRequestId,
+                ok,
+                reason,
+                effectivePath,
+                sizeBytes,
+                sha256,
+                brightness,
+                aeState,
+                exposureNs,
+                iso
+        );
 
         try {
             if (Build.VERSION.SDK_INT >= 29) {
@@ -59,7 +84,6 @@ final class Stage2StatusWriter {
                 writeLegacyPublicDownloads(relativePath, displayName, json);
             }
         } catch (Exception ignored) {
-            // Status-file failure must not crash the helper; the real state is still written when possible.
         }
     }
 
@@ -68,7 +92,11 @@ final class Stage2StatusWriter {
                                     String reason,
                                     String path,
                                     long sizeBytes,
-                                    String sha256) {
+                                    String sha256,
+                                    int brightness,
+                                    String aeState,
+                                    long exposureNs,
+                                    int iso) {
         StringWriter sw = new StringWriter();
         JsonWriter w = new JsonWriter(sw);
         try {
@@ -79,10 +107,14 @@ final class Stage2StatusWriter {
             w.name("path").value(path == null ? "" : path);
             w.name("size").value(sizeBytes);
             w.name("sha256").value(sha256 == null ? "" : sha256);
+            w.name("brightness").value(brightness);
+            w.name("ae_state").value(aeState == null ? "" : aeState);
+            w.name("exposure_ns").value(exposureNs);
+            w.name("iso").value(iso);
             w.name("ts").value(System.currentTimeMillis());
             w.endObject();
         } catch (IOException e) {
-            return "{\"request_id\":\"\",\"ok\":false,\"reason\":\"json_error\",\"path\":\"\",\"size\":0,\"sha256\":\"\",\"ts\":0}";
+            return "{\"request_id\":\"\",\"ok\":false,\"reason\":\"json_error\",\"path\":\"\",\"size\":0,\"sha256\":\"\",\"brightness\":-1,\"ae_state\":\"\",\"exposure_ns\":-1,\"iso\":-1,\"ts\":0}";
         } finally {
             try {
                 w.close();
