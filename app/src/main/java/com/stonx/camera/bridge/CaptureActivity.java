@@ -22,7 +22,7 @@ public class CaptureActivity extends Activity {
     public static final String EXTRA_REQUEST_ID = RecordingForegroundService.EXTRA_REQUEST_ID;
 
     private static final int REQ_PERMISSIONS = 2602;
-    private static final long WATCHDOG_MS = 45000L;
+    private static final long BASE_WATCHDOG_MS = 20000L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private BroadcastReceiver doneReceiver;
@@ -54,7 +54,7 @@ public class CaptureActivity extends Activity {
             return;
         }
         registerDoneReceiver();
-        handler.postDelayed(watchdog, WATCHDOG_MS);
+        handler.postDelayed(watchdog, computeWatchdogMs());
         startWhenAllowed();
     }
 
@@ -86,6 +86,18 @@ public class CaptureActivity extends Activity {
             Stage2StatusWriter.write(this, requestId, false, "invalid_arguments", "", 0L);
             finishAfterTransitionSafe();
         }
+    }
+
+    private long computeWatchdogMs() {
+        int durationSeconds = getIntent() == null ? 0 : getIntent().getIntExtra(EXTRA_DURATION_SECONDS, 0);
+        long watchdogMs = BASE_WATCHDOG_MS + durationSeconds * 1000L;
+        if (watchdogMs < 30000L) {
+            watchdogMs = 30000L;
+        }
+        if (watchdogMs > 3700000L) {
+            watchdogMs = 3700000L;
+        }
+        return watchdogMs;
     }
 
     private void startWhenAllowed() {

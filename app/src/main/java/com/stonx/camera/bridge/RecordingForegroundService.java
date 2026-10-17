@@ -33,6 +33,7 @@ public class RecordingForegroundService extends Service {
         String requestId = intent == null ? "" : intent.getStringExtra(EXTRA_REQUEST_ID);
         String type = intent == null ? "" : intent.getStringExtra(EXTRA_TYPE);
         String face = intent == null ? "" : intent.getStringExtra(EXTRA_FACE);
+        int durationSeconds = intent == null ? 0 : intent.getIntExtra(EXTRA_DURATION_SECONDS, 0);
         if (type == null || type.isEmpty()) {
             type = "stage2";
         }
@@ -47,6 +48,11 @@ public class RecordingForegroundService extends Service {
 
         if ("photo".equals(type)) {
             startPhotoCapture(requestId, face);
+            return START_NOT_STICKY;
+        }
+
+        if ("audio".equals(type)) {
+            startAudioCapture(requestId, durationSeconds);
             return START_NOT_STICKY;
         }
 
@@ -143,6 +149,51 @@ public class RecordingForegroundService extends Service {
                         requestId,
                         false,
                         reason == null || reason.isEmpty() ? "photo_failed" : reason,
+                        "",
+                        0L
+                );
+                sendDone(requestId);
+                removeNotificationAndStop(true);
+            }
+        });
+    }
+
+    private void startAudioCapture(final String requestId, int durationSeconds) {
+        if (durationSeconds <= 0 || durationSeconds > 3600) {
+            Stage2StatusWriter.write(this, requestId, false, "invalid_duration", "", 0L);
+            sendDone(requestId);
+            removeNotificationAndStop(true);
+            return;
+        }
+        new AudioCaptureController(this, durationSeconds, new AudioCaptureController.Callback() {
+            @Override
+            public void onSuccess(String path, long sizeBytes, String sha256, long durationMs, int signalLevel) {
+                Stage2StatusWriter.write(
+                        RecordingForegroundService.this,
+                        requestId,
+                        true,
+                        "audio_ok",
+                        path,
+                        sizeBytes,
+                        sha256,
+                        -1,
+                        "",
+                        -1L,
+                        -1,
+                        durationMs,
+                        signalLevel
+                );
+                sendDone(requestId);
+                removeNotificationAndStop(true);
+            }
+
+            @Override
+            public void onFailure(String reason) {
+                Stage2StatusWriter.write(
+                        RecordingForegroundService.this,
+                        requestId,
+                        false,
+                        reason == null || reason.isEmpty() ? "audio_failed" : reason,
                         "",
                         0L
                 );

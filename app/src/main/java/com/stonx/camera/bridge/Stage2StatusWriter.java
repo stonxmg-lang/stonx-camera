@@ -51,6 +51,22 @@ final class Stage2StatusWriter {
                       String aeState,
                       long exposureNs,
                       int iso) {
+        write(context, requestId, ok, reason, path, sizeBytes, sha256, brightness, aeState, exposureNs, iso, -1L, -1);
+    }
+
+    static void write(Context context,
+                      String requestId,
+                      boolean ok,
+                      String reason,
+                      String path,
+                      long sizeBytes,
+                      String sha256,
+                      int brightness,
+                      String aeState,
+                      long exposureNs,
+                      int iso,
+                      long durationMs,
+                      int signalLevel) {
         String originalRequestId = requestId == null ? "" : requestId.trim();
         String safeRequestId = originalRequestId;
         if (safeRequestId.isEmpty()) {
@@ -74,7 +90,9 @@ final class Stage2StatusWriter {
                 brightness,
                 aeState,
                 exposureNs,
-                iso
+                iso,
+                durationMs,
+                signalLevel
         );
 
         try {
@@ -96,7 +114,9 @@ final class Stage2StatusWriter {
                                     int brightness,
                                     String aeState,
                                     long exposureNs,
-                                    int iso) {
+                                    int iso,
+                                    long durationMs,
+                                    int signalLevel) {
         StringWriter sw = new StringWriter();
         JsonWriter w = new JsonWriter(sw);
         try {
@@ -111,10 +131,12 @@ final class Stage2StatusWriter {
             w.name("ae_state").value(aeState == null ? "" : aeState);
             w.name("exposure_ns").value(exposureNs);
             w.name("iso").value(iso);
+            w.name("duration_ms").value(durationMs);
+            w.name("signal_level").value(signalLevel);
             w.name("ts").value(System.currentTimeMillis());
             w.endObject();
         } catch (IOException e) {
-            return "{\"request_id\":\"\",\"ok\":false,\"reason\":\"json_error\",\"path\":\"\",\"size\":0,\"sha256\":\"\",\"brightness\":-1,\"ae_state\":\"\",\"exposure_ns\":-1,\"iso\":-1,\"ts\":0}";
+            return "{\"request_id\":\"\",\"ok\":false,\"reason\":\"json_error\",\"path\":\"\",\"size\":0,\"sha256\":\"\",\"brightness\":-1,\"ae_state\":\"\",\"exposure_ns\":-1,\"iso\":-1,\"duration_ms\":-1,\"signal_level\":-1,\"ts\":0}";
         } finally {
             try {
                 w.close();
