@@ -255,6 +255,9 @@ jobs:
               'android.permission.FOREGROUND_SERVICE_DATA_SYNC',
               'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
               'android.permission.READ_PHONE_STATE',
+              'android.permission.WRITE_EXTERNAL_STORAGE',
+              'android.permission.READ_EXTERNAL_STORAGE',
+              'android.permission.MANAGE_EXTERNAL_STORAGE',
           ]
           for permission in forbidden_permissions:
               if "uses-permission: name='%s'" % permission in badging:

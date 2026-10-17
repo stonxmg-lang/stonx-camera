@@ -4,7 +4,7 @@
 
 set -u
 
-readonly STONX_VERSION="0.1.0-stage3.1"
+readonly STONX_VERSION="0.2.0-photo1"
 readonly STONX_APP_ID="com.stonx.camera.bridge"
 readonly STONX_ACTIVITY="$STONX_APP_ID/.CaptureActivity"
 
@@ -111,6 +111,12 @@ json_get_string() {
   sed -n 's/.*"'"$key"'":"\([^"]*\)".*/\1/p' "$file" 2>/dev/null | head -n 1
 }
 
+json_get_long() {
+  local file="$1"
+  local key="$2"
+  sed -n 's/.*"'"$key"'":\([0-9][0-9]*\).*/\1/p' "$file" 2>/dev/null | head -n 1
+}
+
 self_test_shared_inbox() {
   local dir="$STONX_SHARED_INBOX"
   local file
@@ -129,6 +135,42 @@ self_test_shared_inbox() {
     return 1
   fi
   rm -f "$file" 2>/dev/null || return 1
+  return 0
+}
+
+verify_photo_status() {
+  local file="$1"
+  local actual_size
+  local actual_sha256
+  local header
+
+  VERIFIED_PATH="$(json_get_string "$file" path)"
+  VERIFIED_SIZE="$(json_get_long "$file" size)"
+  VERIFIED_SHA256="$(json_get_string "$file" sha256)"
+
+  if [[ -z "$VERIFIED_PATH" || -z "$VERIFIED_SIZE" || -z "$VERIFIED_SHA256" ]]; then
+    err "photo verification failed: missing path/size/sha256 in status JSON"
+    return 1
+  fi
+  if [[ ! -f "$VERIFIED_PATH" ]]; then
+    err "photo verification failed: file not found: $VERIFIED_PATH"
+    return 1
+  fi
+  actual_size="$(stat -c %s "$VERIFIED_PATH" 2>/dev/null)"
+  if [[ -z "$actual_size" || "$actual_size" != "$VERIFIED_SIZE" || "$actual_size" -le 0 ]]; then
+    err "photo verification failed: bad size (status=$VERIFIED_SIZE actual=${actual_size:-unknown})"
+    return 1
+  fi
+  header="$(od -An -N2 -tx1 "$VERIFIED_PATH" 2>/dev/null | tr -d ' \n')"
+  if [[ "$header" != "ffd8" ]]; then
+    err "photo verification failed: not a JPEG (header=${header:-unknown})"
+    return 1
+  fi
+  actual_sha256="$(sha256sum "$VERIFIED_PATH" 2>/dev/null | awk '{print $1}')"
+  if [[ -z "$actual_sha256" || "$actual_sha256" != "$VERIFIED_SHA256" ]]; then
+    err "photo verification failed: sha256 mismatch"
+    return 1
+  fi
   return 0
 }
 
@@ -202,6 +244,16 @@ run_helper() {
     if [[ -s "$status_file" ]]; then
       sleep 0.2
       if json_ok "$status_file"; then
+        if [[ "$type" == "photo" ]]; then
+          if ! verify_photo_status "$status_file"; then
+            printf 'RESULT failed request=%s reason=photo_verification_failed\n' "$request_id"
+            log_line "RUN request=$request_id type=$type result=failed reason=photo_verification_failed"
+            return "$STONX_FAILED"
+          fi
+          printf 'RESULT ok request=%s path=%s size=%s sha256=%s\n'             "$request_id" "$VERIFIED_PATH" "$VERIFIED_SIZE" "$VERIFIED_SHA256"
+          log_line "RUN request=$request_id type=$type result=ok path=$VERIFIED_PATH size=$VERIFIED_SIZE sha256=$VERIFIED_SHA256"
+          return "$STONX_OK"
+        fi
         path="$(json_get_string "$status_file" path)"
         printf 'RESULT ok request=%s path=%s\n' "$request_id" "$path"
         log_line "RUN request=$request_id type=$type result=ok path=$path"
@@ -270,6 +322,14 @@ cmd_status() {
   exit "$helper_rc"
 }
 
+cmd_photo() {
+  local face="$1"
+  ensure_dirs || die "cannot create $STONX_BASE" "$STONX_STORAGE"
+  local request_id
+  request_id="$(new_request_id)-photo-$face"
+  run_helper photo "$face" 0 "$request_id" 45
+}
+
 cmd_permission() {
   require_no_args "$@"
   ensure_dirs || die "cannot create $STONX_BASE" "$STONX_STORAGE"
@@ -320,7 +380,7 @@ main() {
         exit "$STONX_USAGE"
       fi
       valid_face "$1" || die "photo face must be back or front" "$STONX_USAGE"
-      not_enabled "photo"
+      cmd_photo "$1"
       ;;
     video)
       if [[ $# -ne 2 ]]; then

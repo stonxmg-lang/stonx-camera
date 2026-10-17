@@ -27,6 +27,16 @@ final class Stage2StatusWriter {
                       String reason,
                       String path,
                       long sizeBytes) {
+        write(context, requestId, ok, reason, path, sizeBytes, "");
+    }
+
+    static void write(Context context,
+                      String requestId,
+                      boolean ok,
+                      String reason,
+                      String path,
+                      long sizeBytes,
+                      String sha256) {
         String originalRequestId = requestId == null ? "" : requestId.trim();
         String safeRequestId = originalRequestId;
         if (safeRequestId.isEmpty()) {
@@ -40,7 +50,7 @@ final class Stage2StatusWriter {
         String relativePath = Environment.DIRECTORY_DOWNLOADS + "/STONX-Camera-Bridge/inbox";
         String sharedPath = "/sdcard/" + relativePath + "/" + displayName;
         String effectivePath = path == null || path.isEmpty() ? sharedPath : path;
-        String json = buildJson(originalRequestId, ok, reason, effectivePath, sizeBytes);
+        String json = buildJson(originalRequestId, ok, reason, effectivePath, sizeBytes, sha256);
 
         try {
             if (Build.VERSION.SDK_INT >= 29) {
@@ -57,7 +67,8 @@ final class Stage2StatusWriter {
                                     boolean ok,
                                     String reason,
                                     String path,
-                                    long sizeBytes) {
+                                    long sizeBytes,
+                                    String sha256) {
         StringWriter sw = new StringWriter();
         JsonWriter w = new JsonWriter(sw);
         try {
@@ -67,10 +78,11 @@ final class Stage2StatusWriter {
             w.name("reason").value(reason == null ? "" : reason);
             w.name("path").value(path == null ? "" : path);
             w.name("size").value(sizeBytes);
+            w.name("sha256").value(sha256 == null ? "" : sha256);
             w.name("ts").value(System.currentTimeMillis());
             w.endObject();
         } catch (IOException e) {
-            return "{\"request_id\":\"\",\"ok\":false,\"reason\":\"json_error\",\"path\":\"\",\"size\":0,\"ts\":0}";
+            return "{\"request_id\":\"\",\"ok\":false,\"reason\":\"json_error\",\"path\":\"\",\"size\":0,\"sha256\":\"\",\"ts\":0}";
         } finally {
             try {
                 w.close();

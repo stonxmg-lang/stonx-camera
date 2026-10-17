@@ -22,7 +22,7 @@ public class CaptureActivity extends Activity {
     public static final String EXTRA_REQUEST_ID = RecordingForegroundService.EXTRA_REQUEST_ID;
 
     private static final int REQ_PERMISSIONS = 2602;
-    private static final long WATCHDOG_MS = 15000L;
+    private static final long WATCHDOG_MS = 45000L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private BroadcastReceiver doneReceiver;
@@ -55,7 +55,7 @@ public class CaptureActivity extends Activity {
         }
         registerDoneReceiver();
         handler.postDelayed(watchdog, WATCHDOG_MS);
-        startDryRunWhenAllowed();
+        startWhenAllowed();
     }
 
     @Override
@@ -88,23 +88,36 @@ public class CaptureActivity extends Activity {
         }
     }
 
-    private void startDryRunWhenAllowed() {
-        if (Build.VERSION.SDK_INT >= 23 && missingRequiredRuntimePermissions()) {
-            requestPermissions(new String[]{
-                    Manifest.permission.CAMERA,
-                    Manifest.permission.RECORD_AUDIO
-            }, REQ_PERMISSIONS);
+    private void startWhenAllowed() {
+        String type = valueOrEmpty(getIntent().getStringExtra(EXTRA_TYPE));
+        String[] required = requiredPermissionsForType(type);
+        if (Build.VERSION.SDK_INT >= 23 && missingAnyPermission(required)) {
+            requestPermissions(required, REQ_PERMISSIONS);
             return;
         }
-        startServiceDryRun();
+        startServiceForType();
     }
 
-    private boolean missingRequiredRuntimePermissions() {
+    private String[] requiredPermissionsForType(String type) {
+        if ("photo".equals(type)) {
+            return new String[]{Manifest.permission.CAMERA};
+        }
+        if ("audio".equals(type)) {
+            return new String[]{Manifest.permission.RECORD_AUDIO};
+        }
+        return new String[]{Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO};
+    }
+
+    private boolean missingAnyPermission(String[] permissions) {
         if (Build.VERSION.SDK_INT < 23) {
             return false;
         }
-        return checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED
-                || checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED;
+        for (String permission : permissions) {
+            if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
@@ -113,18 +126,22 @@ public class CaptureActivity extends Activity {
         if (requestCode != REQ_PERMISSIONS) {
             return;
         }
-        boolean granted = grantResults.length >= 2
-                && grantResults[0] == PackageManager.PERMISSION_GRANTED
-                && grantResults[1] == PackageManager.PERMISSION_GRANTED;
+        boolean granted = grantResults.length == permissions.length && grantResults.length > 0;
+        for (int result : grantResults) {
+            if (result != PackageManager.PERMISSION_GRANTED) {
+                granted = false;
+                break;
+            }
+        }
         if (granted) {
-            startServiceDryRun();
+            startServiceForType();
         } else {
             Stage2StatusWriter.write(this, requestId, false, "permissions_denied", "", 0L);
             finishAfterTransitionSafe();
         }
     }
 
-    private void startServiceDryRun() {
+    private void startServiceForType() {
         try {
             Intent svc = new Intent(this, RecordingForegroundService.class);
             svc.setAction(RecordingForegroundService.ACTION_STAGE2_DRY_RUN);
