@@ -60,13 +60,17 @@ jobs:
           mkdir -p keystores
           base64 --decode keystores/stonx-debug.keystore.b64 > keystores/stonx-debug.keystore
           KEYTOOL_OUT=/tmp/stonx-debug-keytool-list.txt
-          keytool -list -v             -keystore keystores/stonx-debug.keystore             -storepass stonxdebug             -alias stonxdebug > "$KEYTOOL_OUT"
+          keytool -list -v \
+            -keystore keystores/stonx-debug.keystore \
+            -storepass stonxdebug \
+            -alias stonxdebug > "$KEYTOOL_OUT"
           grep -q "Alias name: stonxdebug" "$KEYTOOL_OUT"
           grep -q "Entry type:" "$KEYTOOL_OUT"
           echo "Debug keystore restored from base64 and verified with keytool."
 
       - name: Assemble debug APK
         run: gradle :app:assembleDebug --stacktrace
+
       - name: Verify APK signature, badging, manifest tree, and size
         shell: bash
         run: |
@@ -84,6 +88,70 @@ jobs:
           "$APKSIGNER" verify --verbose --print-certs "$APK_PATH"
           "$AAPT2" dump badging "$APK_PATH"
           "$AAPT2" dump xmltree "$APK_PATH" --file AndroidManifest.xml
+
+      - name: Verify manifest policy for STONX stage 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_PATH="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -n "$APK_PATH"
+          export APK_PATH
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+          import sys
+
+          apk = os.environ['APK_PATH']
+          build_tools = os.path.join(os.environ['ANDROID_HOME'], 'build-tools', '34.0.0')
+          aapt2 = os.path.join(build_tools, 'aapt2')
+
+          badging = subprocess.check_output([aapt2, 'dump', 'badging', apk], text=True)
+          xml = subprocess.check_output([aapt2, 'dump', 'xmltree', apk, '--file', 'AndroidManifest.xml'], text=True)
+
+          def fail(msg):
+              print('MANIFEST_POLICY_FAIL:', msg)
+              sys.exit(1)
+
+          if 'android.intent.action.MAIN' in xml and 'android.intent.category.LAUNCHER' in xml:
+              fail('launcher MAIN/LAUNCHER intent-filter is present')
+          if 'CaptureActivity' not in xml:
+              fail('CaptureActivity missing')
+          if 'RecordingForegroundService' not in xml:
+              fail('RecordingForegroundService missing')
+          if not re.search(r'android:exported\([^)]*\)="true"', xml):
+              fail('CaptureActivity exported=true not found')
+          if not re.search(r'android:exported\([^)]*\)="false"', xml):
+              fail('service exported=false not found')
+          if 'camera|microphone' not in xml:
+              fail('service foregroundServiceType camera|microphone not found')
+
+          required_permissions = [
+              'android.permission.CAMERA',
+              'android.permission.RECORD_AUDIO',
+              'android.permission.POST_NOTIFICATIONS',
+              'android.permission.FOREGROUND_SERVICE',
+              'android.permission.FOREGROUND_SERVICE_CAMERA',
+              'android.permission.FOREGROUND_SERVICE_MICROPHONE',
+          ]
+          for permission in required_permissions:
+              if "name='%s'" % permission not in badging:
+                  fail('missing permission: ' + permission)
+
+          forbidden_permissions = [
+              'android.permission.INTERNET',
+              'android.permission.ACCESS_NETWORK_STATE',
+              'android.permission.RECEIVE_BOOT_COMPLETED',
+              'android.permission.FOREGROUND_SERVICE_DATA_SYNC',
+              'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
+              'android.permission.READ_PHONE_STATE',
+          ]
+          for permission in forbidden_permissions:
+              if permission in badging:
+                  fail('forbidden permission present: ' + permission)
+
+          print('MANIFEST_POLICY_OK')
+          PY
 
       - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
