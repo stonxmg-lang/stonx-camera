@@ -51,7 +51,7 @@ final class Stage2StatusWriter {
                       String aeState,
                       long exposureNs,
                       int iso) {
-        write(context, requestId, ok, reason, path, sizeBytes, sha256, brightness, aeState, exposureNs, iso, -1L, -1);
+        write(context, requestId, ok, reason, path, sizeBytes, sha256, brightness, aeState, exposureNs, iso, -1L, -1, false, false, -1, -1);
     }
 
     static void write(Context context,
@@ -67,6 +67,26 @@ final class Stage2StatusWriter {
                       int iso,
                       long durationMs,
                       int signalLevel) {
+        write(context, requestId, ok, reason, path, sizeBytes, sha256, brightness, aeState, exposureNs, iso, durationMs, signalLevel, false, false, -1, -1);
+    }
+
+    static void write(Context context,
+                      String requestId,
+                      boolean ok,
+                      String reason,
+                      String path,
+                      long sizeBytes,
+                      String sha256,
+                      int brightness,
+                      String aeState,
+                      long exposureNs,
+                      int iso,
+                      long durationMs,
+                      int signalLevel,
+                      boolean hasVideo,
+                      boolean hasAudio,
+                      int width,
+                      int height) {
         String originalRequestId = requestId == null ? "" : requestId.trim();
         String safeRequestId = originalRequestId;
         if (safeRequestId.isEmpty()) {
@@ -92,7 +112,11 @@ final class Stage2StatusWriter {
                 exposureNs,
                 iso,
                 durationMs,
-                signalLevel
+                signalLevel,
+                hasVideo,
+                hasAudio,
+                width,
+                height
         );
 
         try {
@@ -116,7 +140,11 @@ final class Stage2StatusWriter {
                                     long exposureNs,
                                     int iso,
                                     long durationMs,
-                                    int signalLevel) {
+                                    int signalLevel,
+                                    boolean hasVideo,
+                                    boolean hasAudio,
+                                    int width,
+                                    int height) {
         StringWriter sw = new StringWriter();
         JsonWriter w = new JsonWriter(sw);
         try {
@@ -133,10 +161,14 @@ final class Stage2StatusWriter {
             w.name("iso").value(iso);
             w.name("duration_ms").value(durationMs);
             w.name("signal_level").value(signalLevel);
+            w.name("has_video").value(hasVideo);
+            w.name("has_audio").value(hasAudio);
+            w.name("width").value(width);
+            w.name("height").value(height);
             w.name("ts").value(System.currentTimeMillis());
             w.endObject();
         } catch (IOException e) {
-            return "{\"request_id\":\"\",\"ok\":false,\"reason\":\"json_error\",\"path\":\"\",\"size\":0,\"sha256\":\"\",\"brightness\":-1,\"ae_state\":\"\",\"exposure_ns\":-1,\"iso\":-1,\"duration_ms\":-1,\"signal_level\":-1,\"ts\":0}";
+            return "{\"request_id\":\"\",\"ok\":false,\"reason\":\"json_error\",\"path\":\"\",\"size\":0,\"sha256\":\"\",\"brightness\":-1,\"ae_state\":\"\",\"exposure_ns\":-1,\"iso\":-1,\"duration_ms\":-1,\"signal_level\":-1,\"has_video\":false,\"has_audio\":false,\"width\":-1,\"height\":-1,\"ts\":0}";
         } finally {
             try {
                 w.close();
@@ -226,3 +258,4 @@ final class Stage2StatusWriter {
         }
     }
 }
+

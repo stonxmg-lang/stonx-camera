@@ -56,7 +56,11 @@ public class RecordingForegroundService extends Service {
             return START_NOT_STICKY;
         }
 
-        // Stage 2 dry-run only: camera and microphone are intentionally not opened.
+        if ("video".equals(type)) {
+            startVideoCapture(requestId, face, durationSeconds);
+            return START_NOT_STICKY;
+        }
+
         Stage2StatusWriter.write(
                 this,
                 requestId,
@@ -203,6 +207,63 @@ public class RecordingForegroundService extends Service {
         });
     }
 
+    private void startVideoCapture(final String requestId, String face, int durationSeconds) {
+        if (durationSeconds <= 0 || durationSeconds > 3600) {
+            Stage2StatusWriter.write(this, requestId, false, "invalid_duration", "", 0L);
+            sendDone(requestId);
+            removeNotificationAndStop(true);
+            return;
+        }
+        new VideoCaptureController(this, face, durationSeconds, new VideoCaptureController.Callback() {
+            @Override
+            public void onSuccess(String path,
+                                  long sizeBytes,
+                                  String sha256,
+                                  long durationMs,
+                                  int width,
+                                  int height,
+                                  boolean hasVideo,
+                                  boolean hasAudio,
+                                  int brightness) {
+                Stage2StatusWriter.write(
+                        RecordingForegroundService.this,
+                        requestId,
+                        true,
+                        "video_ok",
+                        path,
+                        sizeBytes,
+                        sha256,
+                        brightness,
+                        "",
+                        -1L,
+                        -1,
+                        durationMs,
+                        -1,
+                        hasVideo,
+                        hasAudio,
+                        width,
+                        height
+                );
+                sendDone(requestId);
+                removeNotificationAndStop(true);
+            }
+
+            @Override
+            public void onFailure(String reason) {
+                Stage2StatusWriter.write(
+                        RecordingForegroundService.this,
+                        requestId,
+                        false,
+                        reason == null || reason.isEmpty() ? "video_failed" : reason,
+                        "",
+                        0L
+                );
+                sendDone(requestId);
+                removeNotificationAndStop(true);
+            }
+        });
+    }
+
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationManager nm = getSystemService(NotificationManager.class);
@@ -269,3 +330,4 @@ public class RecordingForegroundService extends Service {
         return requestId.trim().replaceAll("[^A-Za-z0-9._-]", "_");
     }
 }
+
