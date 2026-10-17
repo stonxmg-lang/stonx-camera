@@ -1,10 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# STONX Camera Bridge - Termux control script
-# Stage 3 fix: do not use pm visibility as an install check; decide helper callability from am start + status file.
-
 set -u
 
-readonly STONX_VERSION="0.3.0-audio1"
+readonly STONX_VERSION="0.4.0-video1"
 readonly STONX_APP_ID="com.stonx.camera.bridge"
 readonly STONX_ACTIVITY="$STONX_APP_ID/.CaptureActivity"
 
@@ -43,15 +40,6 @@ Usage:
   stonx-camera list
   stonx-camera pull
   stonx-camera clean
-
-Exit codes:
-  0 success
-  2 usage/validation error
-  3 missing Termux dependency
-  4 helper APK component not installed or not callable
-  5 helper failed or timed out
-  6 shared storage self-test failed
-  9 command exists but is not enabled yet
 EOF
 }
 
@@ -61,12 +49,7 @@ log_line() {
 }
 
 ensure_dirs() {
-  mkdir -p \
-    "$STONX_PHOTOS" \
-    "$STONX_VIDEOS" \
-    "$STONX_AUDIO" \
-    "$STONX_LOGS" \
-    "$STONX_TMP" || return 1
+  mkdir -p "$STONX_PHOTOS" "$STONX_VIDEOS" "$STONX_AUDIO" "$STONX_LOGS" "$STONX_TMP" || return 1
 }
 
 err() {
@@ -102,8 +85,7 @@ new_request_id() {
 }
 
 json_ok() {
-  local file="$1"
-  grep -q '"ok":true' "$file" 2>/dev/null
+  grep -q '"ok":true' "$1" 2>/dev/null
 }
 
 json_get_string() {
@@ -118,25 +100,14 @@ json_get_long() {
   sed -n 's/.*"'"$key"'":\([0-9][0-9]*\).*/\1/p' "$file" 2>/dev/null | head -n 1
 }
 
-self_test_shared_inbox() {
-  local dir="$STONX_SHARED_INBOX"
-  local file
-
-  if [[ ! -d "$dir" ]]; then
-    mkdir -p "$dir" 2>/dev/null || return 1
+json_get_bool() {
+  local file="$1"
+  local key="$2"
+  if grep -q '"'"$key"'":true' "$file" 2>/dev/null; then
+    printf 'true'
+  else
+    printf 'false'
   fi
-  [[ -r "$dir" && -w "$dir" && -x "$dir" ]] || return 1
-
-  file="$dir/.stonx-selftest-$$-$RANDOM.tmp"
-  if ! printf 'stonx-selftest\n' > "$file" 2>/dev/null; then
-    return 1
-  fi
-  if ! grep -q 'stonx-selftest' "$file" 2>/dev/null; then
-    rm -f "$file" 2>/dev/null || true
-    return 1
-  fi
-  rm -f "$file" 2>/dev/null || return 1
-  return 0
 }
 
 verify_photo_status() {
@@ -181,7 +152,6 @@ verify_audio_status() {
   local actual_size
   local actual_sha256
   local header
-  local duration_ms
   local diff
   local allowed
 
@@ -235,6 +205,83 @@ verify_audio_status() {
   return 0
 }
 
+verify_video_status() {
+  local file="$1"
+  local expected_ms="$2"
+  local actual_size
+  local actual_sha256
+  local header
+  local diff
+  local allowed
+
+  VERIFIED_PATH="$(json_get_string "$file" path)"
+  VERIFIED_SIZE="$(json_get_long "$file" size)"
+  VERIFIED_SHA256="$(json_get_string "$file" sha256)"
+  VIDEO_DURATION_MS="$(json_get_long "$file" duration_ms)"
+  VIDEO_WIDTH="$(json_get_long "$file" width)"
+  VIDEO_HEIGHT="$(json_get_long "$file" height)"
+  VIDEO_BRIGHTNESS="$(json_get_long "$file" brightness)"
+  VIDEO_SIGNAL_LEVEL="$(json_get_long "$file" signal_level)"
+  VIDEO_HAS_VIDEO="$(json_get_bool "$file" has_video)"
+  VIDEO_HAS_AUDIO="$(json_get_bool "$file" has_audio)"
+
+  [[ "$VIDEO_DURATION_MS" =~ ^[0-9]+$ ]] || VIDEO_DURATION_MS=-1
+  [[ "$VIDEO_WIDTH" =~ ^[0-9]+$ ]] || VIDEO_WIDTH=-1
+  [[ "$VIDEO_HEIGHT" =~ ^[0-9]+$ ]] || VIDEO_HEIGHT=-1
+  [[ "$VIDEO_BRIGHTNESS" =~ ^-?[0-9]+$ ]] || VIDEO_BRIGHTNESS=-1
+  [[ "$VIDEO_SIGNAL_LEVEL" =~ ^-?[0-9]+$ ]] || VIDEO_SIGNAL_LEVEL=-1
+
+  if [[ -z "$VERIFIED_PATH" || -z "$VERIFIED_SIZE" || -z "$VERIFIED_SHA256" ]]; then
+    err "video verification failed: missing path/size/sha256 in status JSON"
+    return 1
+  fi
+  if [[ ! -f "$VERIFIED_PATH" ]]; then
+    err "video verification failed: file not found: $VERIFIED_PATH"
+    return 1
+  fi
+  actual_size="$(stat -c %s "$VERIFIED_PATH" 2>/dev/null)"
+  if [[ -z "$actual_size" || "$actual_size" != "$VERIFIED_SIZE" || "$actual_size" -le 0 ]]; then
+    err "video verification failed: bad size (status=$VERIFIED_SIZE actual=${actual_size:-unknown})"
+    return 1
+  fi
+  header="$(od -An -N12 -tx1 "$VERIFIED_PATH" 2>/dev/null | tr -d ' \n')"
+  if [[ -z "$header" || "${header:8:8}" != "66747970" ]]; then
+    err "video verification failed: not an MP4/M4A ftyp file"
+    return 1
+  fi
+  actual_sha256="$(sha256sum "$VERIFIED_PATH" 2>/dev/null | awk '{print $1}')"
+  if [[ -z "$actual_sha256" || "$actual_sha256" != "$VERIFIED_SHA256" ]]; then
+    err "video verification failed: sha256 mismatch"
+    return 1
+  fi
+  if [[ "$VIDEO_HAS_VIDEO" != "true" || "$VIDEO_HAS_AUDIO" != "true" ]]; then
+    err "video verification failed: missing video/audio track (has_video=$VIDEO_HAS_VIDEO has_audio=$VIDEO_HAS_AUDIO)"
+    return 1
+  fi
+  if [[ "$VIDEO_WIDTH" -le 0 || "$VIDEO_HEIGHT" -le 0 ]]; then
+    err "video verification failed: invalid dimensions ${VIDEO_WIDTH}x${VIDEO_HEIGHT}"
+    return 1
+  fi
+  if [[ "$VIDEO_DURATION_MS" -lt 0 ]]; then
+    err "video verification failed: missing actual duration"
+    return 1
+  fi
+
+  allowed=$(( expected_ms / 5 ))
+  (( allowed < 500 )) && allowed=500
+  (( allowed > 3000 )) && allowed=3000
+  if [[ "$VIDEO_DURATION_MS" -gt "$expected_ms" ]]; then
+    diff=$(( VIDEO_DURATION_MS - expected_ms ))
+  else
+    diff=$(( expected_ms - VIDEO_DURATION_MS ))
+  fi
+  if [[ "$diff" -gt "$allowed" ]]; then
+    err "video verification failed: duration mismatch (expected=${expected_ms}ms actual=${VIDEO_DURATION_MS}ms allowed=${allowed}ms)"
+    return 1
+  fi
+  return 0
+}
+
 am_output_has_helper_call_failure() {
   local file="$1"
   grep -Eiq \
@@ -256,7 +303,6 @@ run_helper() {
   local request_id="$4"
   local timeout_secs="${5:-25}"
 
-  # Stage 2 helper writes status JSON to this fixed inbox. Keep output_dir explicit and equal to it for now.
   local status_inbox="$STONX_SHARED_INBOX"
   local status_file="$status_inbox/$request_id.json"
   local am_out="$STONX_TMP/am-$request_id.log"
@@ -267,12 +313,10 @@ run_helper() {
 
   if ! command -v am >/dev/null 2>&1; then
     err "Termux dependency missing: am"
-    log_line "RUN request=$request_id type=$type result=dependency_missing command=am"
     return "$STONX_DEP"
   fi
   if ! ensure_dirs; then
     err "cannot create Termux work directories"
-    log_line "RUN request=$request_id type=$type result=termux_dirs_failed"
     return "$STONX_STORAGE"
   fi
 
@@ -289,14 +333,18 @@ run_helper() {
   am_rc=$?
 
   if am_output_has_helper_call_failure "$am_out"; then
-    err "helper component not installed or not callable: $(first_am_output_line "$am_out")"
-    log_line "RUN request=$request_id type=$type result=helper_not_callable am_rc=$am_rc am_output=$(first_am_output_line "$am_out")"
+    if grep -Eiq 'does not exist|Error type 3' "$am_out" 2>/dev/null; then
+      err "helper component not installed or APK version does not match this script: $STONX_ACTIVITY"
+      printf '%s\n' "stonx-camera: المكوّن غير مثبت أو إصدار الـ APK لا يطابق السكربت" >&2
+    else
+      err "helper component not callable: $(first_am_output_line "$am_out")"
+    fi
+    log_line "RUN request=$request_id type=$type result=helper_not_callable component=$STONX_ACTIVITY"
     return "$STONX_HELPER"
   fi
 
   if (( am_rc != 0 )); then
     err "am start failed (rc=$am_rc): $(first_am_output_line "$am_out")"
-    log_line "RUN request=$request_id type=$type result=am_start_failed am_rc=$am_rc am_output=$(first_am_output_line "$am_out")"
     return "$STONX_FAILED"
   fi
 
@@ -325,6 +373,7 @@ run_helper() {
           log_line "RUN request=$request_id type=$type result=ok path=$VERIFIED_PATH size=$VERIFIED_SIZE sha256=$VERIFIED_SHA256 brightness=$PHOTO_BRIGHTNESS ae_state=$PHOTO_AE_STATE exposure_ns=$PHOTO_EXPOSURE_NS iso=$PHOTO_ISO"
           return "$STONX_OK"
         fi
+
         if [[ "$type" == "audio" ]]; then
           if ! verify_audio_status "$status_file" "$(( duration * 1000 ))"; then
             printf 'RESULT failed request=%s reason=audio_verification_failed\n' "$request_id"
@@ -339,6 +388,27 @@ run_helper() {
           log_line "RUN request=$request_id type=$type result=ok path=$VERIFIED_PATH size=$VERIFIED_SIZE sha256=$VERIFIED_SHA256 duration_ms=$AUDIO_DURATION_MS signal_level=$AUDIO_SIGNAL_LEVEL"
           return "$STONX_OK"
         fi
+
+        if [[ "$type" == "video" ]]; then
+          if ! verify_video_status "$status_file" "$(( duration * 1000 ))"; then
+            printf 'RESULT failed request=%s reason=video_verification_failed\n' "$request_id"
+            log_line "RUN request=$request_id type=$type result=failed reason=video_verification_failed"
+            return "$STONX_FAILED"
+          fi
+          printf 'RESULT ok request=%s path=%s size=%s sha256=%s duration_ms=%s width=%s height=%s has_video=%s has_audio=%s brightness=%s signal_level=%s\n' \
+            "$request_id" "$VERIFIED_PATH" "$VERIFIED_SIZE" "$VERIFIED_SHA256" \
+            "$VIDEO_DURATION_MS" "$VIDEO_WIDTH" "$VIDEO_HEIGHT" "$VIDEO_HAS_VIDEO" "$VIDEO_HAS_AUDIO" \
+            "$VIDEO_BRIGHTNESS" "$VIDEO_SIGNAL_LEVEL"
+          if [[ "$VIDEO_BRIGHTNESS" -ge 0 && "$VIDEO_BRIGHTNESS" -lt "$STONX_LOW_BRIGHTNESS" ]]; then
+            printf 'WARNING: dark_video brightness=%s threshold=%s\n' "$VIDEO_BRIGHTNESS" "$STONX_LOW_BRIGHTNESS" >&2
+          fi
+          if [[ "$VIDEO_SIGNAL_LEVEL" -eq 0 ]]; then
+            printf 'WARNING: silent_audio signal_level=0\n' >&2
+          fi
+          log_line "RUN request=$request_id type=$type result=ok path=$VERIFIED_PATH size=$VERIFIED_SIZE sha256=$VERIFIED_SHA256 duration_ms=$VIDEO_DURATION_MS width=$VIDEO_WIDTH height=$VIDEO_HEIGHT has_video=$VIDEO_HAS_VIDEO has_audio=$VIDEO_HAS_AUDIO brightness=$VIDEO_BRIGHTNESS signal_level=$VIDEO_SIGNAL_LEVEL"
+          return "$STONX_OK"
+        fi
+
         path="$(json_get_string "$status_file" path)"
         printf 'RESULT ok request=%s path=%s\n' "$request_id" "$path"
         log_line "RUN request=$request_id type=$type result=ok path=$path"
@@ -359,6 +429,14 @@ run_helper() {
   return "$STONX_FAILED"
 }
 
+cmd_photo() {
+  local face="$1"
+  ensure_dirs || die "cannot create $STONX_BASE" "$STONX_STORAGE"
+  local request_id
+  request_id="$(new_request_id)-photo-$face"
+  run_helper photo "$face" 0 "$request_id" 45
+}
+
 cmd_audio() {
   local duration="$1"
   ensure_dirs || die "cannot create $STONX_BASE" "$STONX_STORAGE"
@@ -367,60 +445,21 @@ cmd_audio() {
   run_helper audio back "$duration" "$request_id" "$(( duration + 20 ))"
 }
 
+cmd_video() {
+  local face="$1"
+  local duration="$2"
+  ensure_dirs || die "cannot create $STONX_BASE" "$STONX_STORAGE"
+  local request_id
+  request_id="$(new_request_id)-video-${face}-${duration}s"
+  run_helper video "$face" "$duration" "$request_id" "$(( duration + 25 ))"
+}
+
 cmd_status() {
   require_no_args "$@"
   ensure_dirs || die "cannot create $STONX_BASE" "$STONX_STORAGE"
-
-  local am_present="no"
-  local pm_visibility="unknown"
-  local shared_ok="no"
   local request_id
-  local helper_rc=0
-
-  if command -v am >/dev/null 2>&1; then
-    am_present="yes"
-  fi
-  if command -v pm >/dev/null 2>&1 && pm path "$STONX_APP_ID" >/dev/null 2>&1; then
-    pm_visibility="visible"
-  else
-    pm_visibility="unknown (package visibility is not decisive)"
-  fi
-  if self_test_shared_inbox; then
-    shared_ok="yes"
-  fi
-
-  printf 'STONX Camera Bridge %s\n' "$STONX_VERSION"
-  printf 'base_dir: %s\n' "$STONX_BASE"
-  printf 'photos: %s\n' "$STONX_PHOTOS"
-  printf 'videos: %s\n' "$STONX_VIDEOS"
-  printf 'audio: %s\n' "$STONX_AUDIO"
-  printf 'logs: %s\n' "$STONX_LOGS"
-  printf 'tmp: %s\n' "$STONX_TMP"
-  printf 'shared_inbox: %s\n' "$STONX_SHARED_INBOX"
-  printf 'shared_out: %s\n' "$STONX_SHARED_OUT"
-  printf 'am_present: %s\n' "$am_present"
-  printf 'helper_pm_visibility: %s\n' "$pm_visibility"
-  printf 'helper_callability: decided by am start + status file\n'
-  printf 'shared_self_test: %s\n' "$shared_ok"
-
-  if [[ "$shared_ok" != "yes" ]]; then
-    err "shared inbox self-test failed"
-    exit "$STONX_STORAGE"
-  fi
-
   request_id="$(new_request_id)-status"
   run_helper stage2 back 0 "$request_id" 25
-  helper_rc=$?
-  printf 'helper_self_test: %s\n' "$(( helper_rc == 0 ? 0 : 1 ))"
-  exit "$helper_rc"
-}
-
-cmd_photo() {
-  local face="$1"
-  ensure_dirs || die "cannot create $STONX_BASE" "$STONX_STORAGE"
-  local request_id
-  request_id="$(new_request_id)-photo-$face"
-  run_helper photo "$face" 0 "$request_id" 45
 }
 
 cmd_permission() {
@@ -483,7 +522,7 @@ main() {
       fi
       valid_face "$1" || die "video face must be back or front" "$STONX_USAGE"
       valid_duration "$2" || die "video duration must be an integer 1..3600" "$STONX_USAGE"
-      not_enabled "video"
+      cmd_video "$1" "$2"
       ;;
     audio)
       if [[ $# -ne 1 ]]; then
@@ -507,3 +546,4 @@ main() {
 }
 
 main "$@"
+
