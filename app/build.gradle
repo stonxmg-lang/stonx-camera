@@ -45,4 +45,3 @@ android {
 dependencies {
     // Stage 1 intentionally has no runtime dependencies.
 }
-
