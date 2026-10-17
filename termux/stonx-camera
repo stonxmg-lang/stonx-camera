@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -u
 
-readonly STONX_VERSION="0.4.0-video1"
+readonly STONX_VERSION="0.5.1-transfer2"
 readonly STONX_APP_ID="com.stonx.camera.bridge"
 readonly STONX_ACTIVITY="$STONX_APP_ID/.CaptureActivity"
 
@@ -12,10 +12,15 @@ readonly STONX_AUDIO="$STONX_BASE/audio"
 readonly STONX_LOGS="$STONX_BASE/logs"
 readonly STONX_TMP="$STONX_BASE/tmp"
 readonly STONX_LOG_FILE="$STONX_LOGS/stonx-camera.log"
+readonly STONX_PULLED_LOG="$STONX_LOGS/pulled.tsv"
+readonly STONX_COPIED_LOG="$STONX_LOGS/copied.tsv"
 
 readonly STONX_SHARED_ROOT="/sdcard/Download/STONX-Camera-Bridge"
 readonly STONX_SHARED_INBOX="$STONX_SHARED_ROOT/inbox"
 readonly STONX_SHARED_OUT="$STONX_SHARED_ROOT/out"
+readonly STONX_SHARED_PHOTOS="/sdcard/Pictures/STONX-Camera-Bridge"
+readonly STONX_SHARED_VIDEOS="/sdcard/Movies/STONX-Camera-Bridge"
+readonly STONX_SHARED_AUDIO="/sdcard/Music/STONX-Camera-Bridge"
 
 readonly STONX_OK=0
 readonly STONX_USAGE=2
@@ -50,6 +55,7 @@ log_line() {
 
 ensure_dirs() {
   mkdir -p "$STONX_PHOTOS" "$STONX_VIDEOS" "$STONX_AUDIO" "$STONX_LOGS" "$STONX_TMP" || return 1
+  touch "$STONX_PULLED_LOG" "$STONX_COPIED_LOG" 2>/dev/null || true
 }
 
 err() {
@@ -110,6 +116,96 @@ json_get_bool() {
   fi
 }
 
+file_size() {
+  stat -c %s "$1" 2>/dev/null
+}
+
+file_created() {
+  local c
+  c="$(stat -c %w "$1" 2>/dev/null || true)"
+  if [[ -z "$c" || "$c" == "-" ]]; then
+    c="$(stat -c %y "$1" 2>/dev/null || true)"
+  fi
+  printf '%s' "${c:-unknown}"
+}
+
+sha256_of() {
+  sha256sum "$1" 2>/dev/null | awk '{print $1}'
+}
+
+media_kind_for_path() {
+  local p="$1"
+  case "$p" in
+    "$STONX_SHARED_PHOTOS"/*.jpg) printf 'photo' ;;
+    "$STONX_SHARED_VIDEOS"/*.mp4) printf 'video' ;;
+    "$STONX_SHARED_AUDIO"/*.m4a) printf 'audio' ;;
+    *) printf '' ;;
+  esac
+}
+
+dest_dir_for_kind() {
+  case "$1" in
+    photo) printf '%s' "$STONX_PHOTOS" ;;
+    video) printf '%s' "$STONX_VIDEOS" ;;
+    audio) printf '%s' "$STONX_AUDIO" ;;
+    *) printf '' ;;
+  esac
+}
+
+is_marked_pulled() {
+  local path="$1"
+  [[ -f "$STONX_PULLED_LOG" ]] || return 1
+  awk -F '\t' -v p="$path" '$1 == p { found=1 } END { exit(found ? 0 : 1) }' "$STONX_PULLED_LOG" 2>/dev/null
+}
+
+record_pulled() {
+  local shared_path="$1"
+  local kind="$2"
+  local dest="$3"
+  local size="$4"
+  local sha256="$5"
+  printf '%s\t%s\t%s\t%s\t%s\ttrue\t%s\n' \
+    "$shared_path" "$kind" "$dest" "$size" "$sha256" "$(date '+%Y-%m-%d %H:%M:%S')" >> "$STONX_PULLED_LOG" 2>/dev/null || true
+}
+
+is_marked_copied() {
+  local path="$1"
+  [[ -f "$STONX_COPIED_LOG" ]] || return 1
+  grep -Fxq -- "$path" "$STONX_COPIED_LOG" 2>/dev/null
+}
+
+record_copied() {
+  local path="$1"
+  if ! is_marked_copied "$path"; then
+    printf '%s\n' "$path" >> "$STONX_COPIED_LOG" 2>/dev/null || true
+  fi
+}
+
+unmark_copied() {
+  local path="$1"
+  [[ -f "$STONX_COPIED_LOG" ]] || return 0
+  grep -Fxv -- "$path" "$STONX_COPIED_LOG" > "$STONX_COPIED_LOG.tmp" 2>/dev/null || true
+  mv -f -- "$STONX_COPIED_LOG.tmp" "$STONX_COPIED_LOG" 2>/dev/null || true
+}
+
+verify_copy_matches() {
+  local src="$1"
+  local dst="$2"
+  local src_size
+  local dst_size
+  local src_sha
+  local dst_sha
+
+  src_size="$(file_size "$src")"
+  dst_size="$(file_size "$dst")"
+  if [[ -z "$src_size" || -z "$dst_size" || "$src_size" != "$dst_size" || "$src_size" -le 0 ]]; then
+    return 1
+  fi
+  src_sha="$(sha256_of "$src")"
+  dst_sha="$(sha256_of "$dst")"
+  [[ -n "$src_sha" && -n "$dst_sha" && "$src_sha" == "$dst_sha" ]]
+}
+
 verify_photo_status() {
   local file="$1"
   local actual_size
@@ -128,7 +224,7 @@ verify_photo_status() {
     err "photo verification failed: file not found: $VERIFIED_PATH"
     return 1
   fi
-  actual_size="$(stat -c %s "$VERIFIED_PATH" 2>/dev/null)"
+  actual_size="$(file_size "$VERIFIED_PATH")"
   if [[ -z "$actual_size" || "$actual_size" != "$VERIFIED_SIZE" || "$actual_size" -le 0 ]]; then
     err "photo verification failed: bad size (status=$VERIFIED_SIZE actual=${actual_size:-unknown})"
     return 1
@@ -138,7 +234,7 @@ verify_photo_status() {
     err "photo verification failed: not a JPEG (header=${header:-unknown})"
     return 1
   fi
-  actual_sha256="$(sha256sum "$VERIFIED_PATH" 2>/dev/null | awk '{print $1}')"
+  actual_sha256="$(sha256_of "$VERIFIED_PATH")"
   if [[ -z "$actual_sha256" || "$actual_sha256" != "$VERIFIED_SHA256" ]]; then
     err "photo verification failed: sha256 mismatch"
     return 1
@@ -171,7 +267,7 @@ verify_audio_status() {
     err "audio verification failed: file not found: $VERIFIED_PATH"
     return 1
   fi
-  actual_size="$(stat -c %s "$VERIFIED_PATH" 2>/dev/null)"
+  actual_size="$(file_size "$VERIFIED_PATH")"
   if [[ -z "$actual_size" || "$actual_size" != "$VERIFIED_SIZE" || "$actual_size" -le 0 ]]; then
     err "audio verification failed: bad size (status=$VERIFIED_SIZE actual=${actual_size:-unknown})"
     return 1
@@ -181,7 +277,7 @@ verify_audio_status() {
     err "audio verification failed: not an MP4/M4A ftyp file"
     return 1
   fi
-  actual_sha256="$(sha256sum "$VERIFIED_PATH" 2>/dev/null | awk '{print $1}')"
+  actual_sha256="$(sha256_of "$VERIFIED_PATH")"
   if [[ -z "$actual_sha256" || "$actual_sha256" != "$VERIFIED_SHA256" ]]; then
     err "audio verification failed: sha256 mismatch"
     return 1
@@ -239,7 +335,7 @@ verify_video_status() {
     err "video verification failed: file not found: $VERIFIED_PATH"
     return 1
   fi
-  actual_size="$(stat -c %s "$VERIFIED_PATH" 2>/dev/null)"
+  actual_size="$(file_size "$VERIFIED_PATH")"
   if [[ -z "$actual_size" || "$actual_size" != "$VERIFIED_SIZE" || "$actual_size" -le 0 ]]; then
     err "video verification failed: bad size (status=$VERIFIED_SIZE actual=${actual_size:-unknown})"
     return 1
@@ -249,7 +345,7 @@ verify_video_status() {
     err "video verification failed: not an MP4/M4A ftyp file"
     return 1
   fi
-  actual_sha256="$(sha256sum "$VERIFIED_PATH" 2>/dev/null | awk '{print $1}')"
+  actual_sha256="$(sha256_of "$VERIFIED_PATH")"
   if [[ -z "$actual_sha256" || "$actual_sha256" != "$VERIFIED_SHA256" ]]; then
     err "video verification failed: sha256 mismatch"
     return 1
@@ -266,7 +362,6 @@ verify_video_status() {
     err "video verification failed: missing actual duration"
     return 1
   fi
-
   allowed=$(( expected_ms / 5 ))
   (( allowed < 500 )) && allowed=500
   (( allowed > 3000 )) && allowed=3000
@@ -429,6 +524,71 @@ run_helper() {
   return "$STONX_FAILED"
 }
 
+run_delete_helper() {
+  local shared_path="$1"
+  local request_id="$2"
+  local timeout_secs="${3:-30}"
+
+  local status_inbox="$STONX_SHARED_INBOX"
+  local status_file="$status_inbox/$request_id.json"
+  local am_out="$STONX_TMP/am-$request_id.log"
+  local am_rc
+  local reason
+  local deadline
+
+  if ! command -v am >/dev/null 2>&1; then
+    err "Termux dependency missing: am"
+    return "$STONX_DEP"
+  fi
+  if ! ensure_dirs; then
+    err "cannot create Termux work directories"
+    return "$STONX_STORAGE"
+  fi
+
+  log_line "DELETE request=$request_id shared_path=$shared_path timeout=$timeout_secs"
+
+  : > "$am_out" 2>/dev/null || true
+  am start \
+      -n "$STONX_ACTIVITY" \
+      --es type delete_shared \
+      --es face back \
+      --ei duration_seconds 0 \
+      --es shared_path "$shared_path" \
+      --es request_id "$request_id" > "$am_out" 2>&1
+  am_rc=$?
+
+  if am_output_has_helper_call_failure "$am_out"; then
+    err "delete helper component not installed or not callable: $(first_am_output_line "$am_out")"
+    return "$STONX_HELPER"
+  fi
+  if (( am_rc != 0 )); then
+    err "delete am start failed (rc=$am_rc): $(first_am_output_line "$am_out")"
+    return "$STONX_FAILED"
+  fi
+
+  deadline=$((SECONDS + timeout_secs))
+  while (( SECONDS < deadline )); do
+    if [[ -s "$status_file" ]]; then
+      sleep 0.2
+      if json_ok "$status_file"; then
+        printf 'RESULT ok request=%s path=%s\n' "$request_id" "$shared_path"
+        log_line "DELETE request=$request_id result=ok shared_path=$shared_path"
+        return "$STONX_OK"
+      else
+        reason="$(json_get_string "$status_file" reason)"
+        printf 'RESULT failed request=%s reason=%s\n' "$request_id" "${reason:-unknown}"
+        log_line "DELETE request=$request_id result=failed reason=$reason shared_path=$shared_path"
+        return "$STONX_FAILED"
+      fi
+    fi
+    sleep 0.2
+  done
+
+  err "delete status timeout after ${timeout_secs}s: $status_file"
+  printf 'RESULT failed request=%s reason=delete_status_timeout\n' "$request_id"
+  return "$STONX_FAILED"
+}
+
 cmd_photo() {
   local face="$1"
   ensure_dirs || die "cannot create $STONX_BASE" "$STONX_STORAGE"
@@ -468,6 +628,176 @@ cmd_permission() {
   local request_id
   request_id="$(new_request_id)-permission"
   run_helper stage2 back 0 "$request_id" 30
+}
+
+cmd_list() {
+  require_no_args "$@"
+  ensure_dirs || die "cannot create $STONX_BASE" "$STONX_STORAGE"
+
+  local spec
+  local kind
+  local dir
+  local pattern
+  local f
+  local base
+  local maybe_dest
+  local size
+  local created
+  local status
+
+  printf 'STATUS\tTYPE\tSIZE\tCREATED\tPATH\n'
+
+  for spec in \
+    "photo|$STONX_SHARED_PHOTOS|*.jpg" \
+    "video|$STONX_SHARED_VIDEOS|*.mp4" \
+    "audio|$STONX_SHARED_AUDIO|*.m4a"; do
+    IFS='|' read -r kind dir pattern <<< "$spec"
+    [[ -d "$dir" ]] || continue
+    while IFS= read -r -d '' f; do
+      [[ -f "$f" ]] || continue
+      base="$(basename "$f")"
+      [[ "$base" == .* ]] && continue
+      maybe_dest="$(dest_dir_for_kind "$kind")/$base"
+      size="$(file_size "$f")"
+      created="$(file_created "$f")"
+      status="pending"
+      if is_marked_copied "$f" || { [[ -e "$maybe_dest" ]] && verify_copy_matches "$f" "$maybe_dest"; }; then
+        status="copied_not_deleted"
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\n' "$status" "$kind" "${size:-0}" "$created" "$f"
+    done < <(find "$dir" -maxdepth 1 -type f -name "$pattern" -print0 2>/dev/null | sort -z)
+  done
+
+  if [[ -f "$STONX_PULLED_LOG" ]]; then
+    local shared_path
+    local logged_kind
+    local dest
+    local logged_size
+    local logged_sha
+    local deleted
+    local ts
+    while IFS=$'\t' read -r shared_path logged_kind dest logged_size logged_sha deleted ts; do
+      [[ "$deleted" == "true" ]] || continue
+      [[ -e "$shared_path" ]] && continue
+      printf '%s\t%s\t%s\t%s\t%s\n' "done" "${logged_kind:-unknown}" "${logged_size:--}" "${ts:--}" "$shared_path"
+    done < "$STONX_PULLED_LOG"
+  fi
+}
+
+cmd_pull() {
+  require_no_args "$@"
+  ensure_dirs || die "cannot create $STONX_BASE" "$STONX_STORAGE"
+
+  local processed=0
+  local failures=0
+  local spec
+  local kind
+  local dir
+  local pattern
+  local src
+  local base
+  local dest_dir
+  local dest
+  local tmp_dest
+  local src_size
+  local src_sha
+  local request_id
+
+  for spec in \
+    "photo|$STONX_SHARED_PHOTOS|*.jpg" \
+    "video|$STONX_SHARED_VIDEOS|*.mp4" \
+    "audio|$STONX_SHARED_AUDIO|*.m4a"; do
+    IFS='|' read -r kind dir pattern <<< "$spec"
+    [[ -d "$dir" ]] || continue
+    dest_dir="$(dest_dir_for_kind "$kind")"
+    [[ -n "$dest_dir" ]] || continue
+    mkdir -p "$dest_dir" 2>/dev/null || true
+
+    while IFS= read -r -d '' src; do
+      [[ -f "$src" ]] || continue
+      base="$(basename "$src")"
+      [[ "$base" == .* ]] && continue
+      processed=1
+      dest="$dest_dir/$base"
+
+      if is_marked_copied "$src" && [[ -e "$dest" ]] && verify_copy_matches "$src" "$dest"; then
+        request_id="$(new_request_id)-pull-delete"
+        if run_delete_helper "$src" "$request_id" 30 && [[ ! -e "$src" ]]; then
+          unmark_copied "$src"
+          src_size="$(file_size "$dest")"
+          src_sha="$(sha256_of "$dest")"
+          record_pulled "$src" "$kind" "$dest" "${src_size:-0}" "${src_sha:-}"
+          printf 'PULLED %s -> %s\n' "$src" "$dest"
+          log_line "PULL src=$src kind=$kind dest=$dest result=ok_copy_reused_delete_confirmed"
+        else
+          err "pull delete helper failed or original still exists: $src"
+          log_line "PULL src=$src kind=$kind dest=$dest result=delete_retry_failed"
+          failures=$(( failures + 1 ))
+        fi
+        continue
+      fi
+
+      tmp_dest="$dest.part-$$-$RANDOM"
+      rm -f -- "$tmp_dest" 2>/dev/null || true
+
+      if ! cp -f -- "$src" "$tmp_dest" 2>/dev/null; then
+        rm -f -- "$tmp_dest" 2>/dev/null || true
+        err "pull copy failed: $src"
+        log_line "PULL src=$src kind=$kind result=copy_failed"
+        failures=$(( failures + 1 ))
+        continue
+      fi
+
+      if ! verify_copy_matches "$src" "$tmp_dest"; then
+        rm -f -- "$tmp_dest" 2>/dev/null || true
+        err "pull verification failed: $src"
+        log_line "PULL src=$src kind=$kind result=verify_failed"
+        failures=$(( failures + 1 ))
+        continue
+      fi
+
+      if ! mv -f -- "$tmp_dest" "$dest" 2>/dev/null; then
+        rm -f -- "$tmp_dest" 2>/dev/null || true
+        err "pull finalize failed: $dest"
+        log_line "PULL src=$src kind=$kind dest=$dest result=finalize_failed"
+        failures=$(( failures + 1 ))
+        continue
+      fi
+
+      record_copied "$src"
+      request_id="$(new_request_id)-pull-delete"
+      if ! run_delete_helper "$src" "$request_id" 30; then
+        err "pull delete helper failed for: $src"
+        log_line "PULL src=$src kind=$kind dest=$dest result=delete_failed"
+        failures=$(( failures + 1 ))
+        continue
+      fi
+
+      if [[ -e "$src" ]]; then
+        err "pull delete reported ok but original still exists: $src"
+        log_line "PULL src=$src kind=$kind dest=$dest result=delete_confirmed_but_original_exists"
+        failures=$(( failures + 1 ))
+        continue
+      fi
+
+      unmark_copied "$src"
+      src_size="$(file_size "$dest")"
+      src_sha="$(sha256_of "$dest")"
+      record_pulled "$src" "$kind" "$dest" "${src_size:-0}" "${src_sha:-}"
+      printf 'PULLED %s -> %s\n' "$src" "$dest"
+      log_line "PULL src=$src kind=$kind dest=$dest size=${src_size:-0} sha256=${src_sha:-} result=ok"
+    done < <(find "$dir" -maxdepth 1 -type f -name "$pattern" -print0 2>/dev/null | sort -z)
+  done
+
+  if [[ "$processed" -eq 0 ]]; then
+    printf 'pull: nothing to do\n'
+    return "$STONX_OK"
+  fi
+  if [[ "$failures" -gt 0 ]]; then
+    err "pull completed with failures: $failures"
+    return "$STONX_FAILED"
+  fi
+  return "$STONX_OK"
 }
 
 not_enabled() {
@@ -533,9 +863,15 @@ main() {
       valid_duration "$1" || die "audio duration must be an integer 1..3600" "$STONX_USAGE"
       cmd_audio "$1"
       ;;
-    list|pull|clean)
+    list)
+      cmd_list "$@"
+      ;;
+    pull)
+      cmd_pull "$@"
+      ;;
+    clean)
       require_no_args "$@"
-      not_enabled "$cmd"
+      not_enabled "clean"
       ;;
     *)
       err "unknown command: ${cmd:-<empty>}"

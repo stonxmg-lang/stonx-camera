@@ -65,10 +65,15 @@ final class SharedMediaDeleter {
             collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
         }
 
+        String relSlash = parsed.relativePath.endsWith("/")
+                ? parsed.relativePath
+                : parsed.relativePath + "/";
+
         String[] projection = new String[]{MediaStore.MediaColumns._ID};
-        String selection = MediaStore.MediaColumns.DISPLAY_NAME + "=? AND "
-                + MediaStore.MediaColumns.RELATIVE_PATH + "=?";
-        String[] args = new String[]{parsed.displayName, parsed.relativePath};
+        String selection = MediaStore.MediaColumns.DISPLAY_NAME + "=? AND ("
+                + MediaStore.MediaColumns.RELATIVE_PATH + "=? OR "
+                + MediaStore.MediaColumns.RELATIVE_PATH + "=?)";
+        String[] args = new String[]{parsed.displayName, parsed.relativePath, relSlash};
 
         long id;
         try (Cursor cursor = resolver.query(collection, projection, selection, args, null)) {
