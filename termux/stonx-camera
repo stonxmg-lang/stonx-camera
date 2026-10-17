@@ -1,0 +1,330 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# STONX Camera Bridge - Termux control script
+# Stage 3: command skeleton, shared-status runner, status/permission only.
+
+set -u
+
+readonly STONX_VERSION="0.1.0-stage3"
+readonly STONX_APP_ID="com.stonx.camera.bridge"
+readonly STONX_ACTIVITY="$STONX_APP_ID/.CaptureActivity"
+
+readonly STONX_BASE="$HOME/STONX-Camera-Bridge"
+readonly STONX_PHOTOS="$STONX_BASE/photos"
+readonly STONX_VIDEOS="$STONX_BASE/videos"
+readonly STONX_AUDIO="$STONX_BASE/audio"
+readonly STONX_LOGS="$STONX_BASE/logs"
+readonly STONX_TMP="$STONX_BASE/tmp"
+readonly STONX_LOG_FILE="$STONX_LOGS/stonx-camera.log"
+
+readonly STONX_SHARED_ROOT="/sdcard/Download/STONX-Camera-Bridge"
+readonly STONX_SHARED_INBOX="$STONX_SHARED_ROOT/inbox"
+readonly STONX_SHARED_OUT="$STONX_SHARED_ROOT/out"
+
+readonly STONX_OK=0
+readonly STONX_USAGE=2
+readonly STONX_DEP=3
+readonly STONX_HELPER=4
+readonly STONX_FAILED=5
+readonly STONX_STORAGE=6
+readonly STONX_NOT_ENABLED=9
+
+usage() {
+  cat <<'EOF'
+STONX Camera Bridge
+
+Usage:
+  stonx-camera --install
+  stonx-camera permission
+  stonx-camera status
+  stonx-camera photo back|front
+  stonx-camera video back|front <seconds>
+  stonx-camera audio <seconds>
+  stonx-camera list
+  stonx-camera pull
+  stonx-camera clean
+
+Exit codes:
+  0 success
+  2 usage/validation error
+  3 missing Termux dependency
+  4 helper APK missing/not callable
+  5 helper failed or timed out
+  6 shared storage self-test failed
+  9 command exists but is not enabled yet
+EOF
+}
+
+log_line() {
+  mkdir -p "$STONX_LOGS" 2>/dev/null || return 0
+  printf '%s\t%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$STONX_LOG_FILE" 2>/dev/null || true
+}
+
+ensure_dirs() {
+  mkdir -p \
+    "$STONX_PHOTOS" \
+    "$STONX_VIDEOS" \
+    "$STONX_AUDIO" \
+    "$STONX_LOGS" \
+    "$STONX_TMP" || return 1
+}
+
+err() {
+  printf 'stonx-camera: error: %s\n' "$*" >&2
+  log_line "ERROR $*"
+}
+
+die() {
+  err "$1"
+  exit "${2:-$STONX_USAGE}"
+}
+
+require_no_args() {
+  if [[ $# -ne 0 ]]; then
+    err "unexpected argument(s): $*"
+    usage >&2
+    exit "$STONX_USAGE"
+  fi
+}
+
+valid_face() {
+  [[ "${1:-}" == "back" || "${1:-}" == "front" ]]
+}
+
+valid_duration() {
+  local d="${1:-}"
+  [[ "$d" =~ ^[0-9]+$ ]] || return 1
+  (( d > 0 && d <= 3600 )) || return 1
+}
+
+new_request_id() {
+  printf '%s-%s-%s' "$(date '+%Y%m%d-%H%M%S')" "$$" "$RANDOM"
+}
+
+json_ok() {
+  local file="$1"
+  grep -q '"ok":true' "$file" 2>/dev/null
+}
+
+json_get_string() {
+  local file="$1"
+  local key="$2"
+  sed -n 's/.*"'"$key"'":"\([^"]*\)".*/\1/p' "$file" 2>/dev/null | head -n 1
+}
+
+self_test_shared_inbox() {
+  local dir="$STONX_SHARED_INBOX"
+  local file
+
+  if [[ ! -d "$dir" ]]; then
+    mkdir -p "$dir" 2>/dev/null || return 1
+  fi
+  [[ -r "$dir" && -w "$dir" && -x "$dir" ]] || return 1
+
+  file="$dir/.stonx-selftest-$$-$RANDOM.tmp"
+  if ! printf 'stonx-selftest\n' > "$file" 2>/dev/null; then
+    return 1
+  fi
+  if ! grep -q 'stonx-selftest' "$file" 2>/dev/null; then
+    rm -f "$file" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$file" 2>/dev/null || return 1
+  return 0
+}
+
+run_helper() {
+  local type="$1"
+  local face="$2"
+  local duration="$3"
+  local request_id="$4"
+  local timeout_secs="${5:-25}"
+
+  local status_file="$STONX_SHARED_INBOX/$request_id.json"
+  local reason
+  local path
+  local deadline
+
+  if ! command -v am >/dev/null 2>&1; then
+    err "Termux dependency missing: am"
+    log_line "RUN request=$request_id type=$type result=dependency_missing command=am"
+    return "$STONX_DEP"
+  fi
+  if ! command -v pm >/dev/null 2>&1; then
+    err "Termux dependency missing: pm"
+    log_line "RUN request=$request_id type=$type result=dependency_missing command=pm"
+    return "$STONX_DEP"
+  fi
+  if ! pm path "$STONX_APP_ID" >/dev/null 2>&1; then
+    err "helper APK not installed: $STONX_APP_ID"
+    log_line "RUN request=$request_id type=$type result=helper_missing"
+    return "$STONX_HELPER"
+  fi
+
+  log_line "RUN request=$request_id type=$type face=$face duration=$duration timeout=$timeout_secs"
+
+  if ! am start \
+      -n "$STONX_ACTIVITY" \
+      --es type "$type" \
+      --es face "$face" \
+      --ei duration_seconds "$duration" \
+      --es output_dir "$STONX_SHARED_OUT" \
+      --es request_id "$request_id" >/dev/null 2>&1; then
+    err "failed to start helper activity"
+    log_line "RUN request=$request_id type=$type result=start_failed"
+    return "$STONX_FAILED"
+  fi
+
+  deadline=$((SECONDS + timeout_secs))
+  while (( SECONDS < deadline )); do
+    if [[ -s "$status_file" ]]; then
+      sleep 0.2
+      if json_ok "$status_file"; then
+        path="$(json_get_string "$status_file" path)"
+        printf 'RESULT ok request=%s path=%s\n' "$request_id" "$path"
+        log_line "RUN request=$request_id type=$type result=ok path=$path"
+        return "$STONX_OK"
+      else
+        reason="$(json_get_string "$status_file" reason)"
+        printf 'RESULT failed request=%s reason=%s\n' "$request_id" "${reason:-unknown}"
+        log_line "RUN request=$request_id type=$type result=failed reason=$reason"
+        return "$STONX_FAILED"
+      fi
+    fi
+    sleep 0.2
+  done
+
+  err "status timeout after ${timeout_secs}s: $status_file"
+  log_line "RUN request=$request_id type=$type result=timeout file=$status_file"
+  printf 'RESULT failed request=%s reason=status_timeout\n' "$request_id"
+  return "$STONX_FAILED"
+}
+
+cmd_status() {
+  require_no_args "$@"
+  ensure_dirs || die "cannot create $STONX_BASE" "$STONX_STORAGE"
+
+  local helper_installed="no"
+  local am_present="no"
+  local shared_ok="no"
+  local request_id
+  local helper_rc=0
+
+  if command -v am >/dev/null 2>&1; then
+    am_present="yes"
+  fi
+  if command -v pm >/dev/null 2>&1 && pm path "$STONX_APP_ID" >/dev/null 2>&1; then
+    helper_installed="yes"
+  fi
+  if self_test_shared_inbox; then
+    shared_ok="yes"
+  fi
+
+  printf 'STONX Camera Bridge %s\n' "$STONX_VERSION"
+  printf 'base_dir: %s\n' "$STONX_BASE"
+  printf 'photos: %s\n' "$STONX_PHOTOS"
+  printf 'videos: %s\n' "$STONX_VIDEOS"
+  printf 'audio: %s\n' "$STONX_AUDIO"
+  printf 'logs: %s\n' "$STONX_LOGS"
+  printf 'tmp: %s\n' "$STONX_TMP"
+  printf 'shared_inbox: %s\n' "$STONX_SHARED_INBOX"
+  printf 'shared_out: %s\n' "$STONX_SHARED_OUT"
+  printf 'am_present: %s\n' "$am_present"
+  printf 'helper_installed: %s\n' "$helper_installed"
+  printf 'shared_self_test: %s\n' "$shared_ok"
+
+  if [[ "$shared_ok" != "yes" ]]; then
+    err "shared inbox self-test failed"
+    exit "$STONX_STORAGE"
+  fi
+
+  request_id="$(new_request_id)-status"
+  run_helper stage2 back 0 "$request_id" 25
+  helper_rc=$?
+  printf 'helper_self_test: %s\n' "$(( helper_rc == 0 ? 0 : 1 ))"
+  exit "$helper_rc"
+}
+
+cmd_permission() {
+  require_no_args "$@"
+  ensure_dirs || die "cannot create $STONX_BASE" "$STONX_STORAGE"
+  local request_id
+  request_id="$(new_request_id)-permission"
+  run_helper stage2 back 0 "$request_id" 30
+}
+
+not_enabled() {
+  local name="$1"
+  printf 'stonx-camera: %s: not enabled yet\n' "$name" >&2
+  log_line "NOT_ENABLED command=$name"
+  exit "$STONX_NOT_ENABLED"
+}
+
+if [[ "${1:-}" == "--install" ]]; then
+  if [[ -z "${PREFIX:-}" ]]; then
+    die "PREFIX is not set; run this inside Termux" "$STONX_DEP"
+  fi
+  script_source="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
+  mkdir -p "$PREFIX/bin" || die "cannot create $PREFIX/bin" "$STONX_DEP"
+  install -m 755 "$script_source" "$PREFIX/bin/stonx-camera" || die "install failed" "$STONX_DEP"
+  printf 'installed: %s\n' "$PREFIX/bin/stonx-camera"
+  exit "$STONX_OK"
+fi
+
+main() {
+  local cmd="${1:-}"
+  if [[ $# -gt 0 ]]; then
+    shift || true
+  fi
+
+  case "$cmd" in
+    ""|-h|--help|help)
+      usage
+      exit "$STONX_OK"
+      ;;
+    status)
+      cmd_status "$@"
+      ;;
+    permission)
+      cmd_permission "$@"
+      ;;
+    photo)
+      if [[ $# -ne 1 ]]; then
+        err "photo requires: back|front"
+        usage >&2
+        exit "$STONX_USAGE"
+      fi
+      valid_face "$1" || die "photo face must be back or front" "$STONX_USAGE"
+      not_enabled "photo"
+      ;;
+    video)
+      if [[ $# -ne 2 ]]; then
+        err "video requires: back|front <seconds>"
+        usage >&2
+        exit "$STONX_USAGE"
+      fi
+      valid_face "$1" || die "video face must be back or front" "$STONX_USAGE"
+      valid_duration "$2" || die "video duration must be an integer 1..3600" "$STONX_USAGE"
+      not_enabled "video"
+      ;;
+    audio)
+      if [[ $# -ne 1 ]]; then
+        err "audio requires: <seconds>"
+        usage >&2
+        exit "$STONX_USAGE"
+      fi
+      valid_duration "$1" || die "audio duration must be an integer 1..3600" "$STONX_USAGE"
+      not_enabled "audio"
+      ;;
+    list|pull|clean)
+      require_no_args "$@"
+      not_enabled "$cmd"
+      ;;
+    *)
+      err "unknown command: ${cmd:-<empty>}"
+      usage >&2
+      exit "$STONX_USAGE"
+      ;;
+  esac
+}
+
+main "$@"
