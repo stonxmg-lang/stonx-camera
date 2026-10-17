@@ -20,6 +20,7 @@ public class CaptureActivity extends Activity {
     public static final String EXTRA_DURATION_SECONDS = RecordingForegroundService.EXTRA_DURATION_SECONDS;
     public static final String EXTRA_OUTPUT_DIR = RecordingForegroundService.EXTRA_OUTPUT_DIR;
     public static final String EXTRA_REQUEST_ID = RecordingForegroundService.EXTRA_REQUEST_ID;
+    public static final String EXTRA_SHARED_PATH = "shared_path";
 
     private static final int REQ_PERMISSIONS = 2602;
     private static final long BASE_WATCHDOG_MS = 20000L;
@@ -53,6 +54,10 @@ public class CaptureActivity extends Activity {
         if (isFinishing()) {
             return;
         }
+        if ("delete_shared".equals(valueOrEmpty(getIntent().getStringExtra(EXTRA_TYPE)))) {
+            handleDeleteSharedAndFinish();
+            return;
+        }
         registerDoneReceiver();
         handler.postDelayed(watchdog, computeWatchdogMs());
         startWhenAllowed();
@@ -65,27 +70,22 @@ public class CaptureActivity extends Activity {
         super.onDestroy();
     }
 
-    private void parseAndValidateOrFinish(Intent intent) {
-        if (intent == null) {
-            Stage2StatusWriter.write(this, "", false, "missing_intent", "", 0L);
-            finishAfterTransitionSafe();
-            return;
+    private void handleDeleteSharedAndFinish() {
+        String req = valueOrEmpty(getIntent().getStringExtra(EXTRA_REQUEST_ID));
+        if (req.isEmpty()) {
+            req = "delete-" + System.currentTimeMillis();
         }
-        requestId = valueOrEmpty(intent.getStringExtra(EXTRA_REQUEST_ID));
-        String type = valueOrEmpty(intent.getStringExtra(EXTRA_TYPE));
-        String face = valueOrEmpty(intent.getStringExtra(EXTRA_FACE));
-        int duration = intent.getIntExtra(EXTRA_DURATION_SECONDS, -1);
-
-        boolean validType = "photo".equals(type)
-                || "video".equals(type)
-                || "audio".equals(type)
-                || "stage2".equals(type);
-        boolean validFace = "back".equals(face) || "front".equals(face);
-        boolean validDuration = duration >= 0 && duration <= 3600;
-        if (!validType || !validFace || !validDuration) {
-            Stage2StatusWriter.write(this, requestId, false, "invalid_arguments", "", 0L);
-            finishAfterTransitionSafe();
-        }
+        String sharedPath = valueOrEmpty(getIntent().getStringExtra(EXTRA_SHARED_PATH));
+        SharedMediaDeleter.Result result = SharedMediaDeleter.delete(this, sharedPath);
+        Stage2StatusWriter.write(
+                this,
+                req,
+                result.ok,
+                result.reason,
+                result.path,
+                0L
+        );
+        finish();
     }
 
     private long computeWatchdogMs() {
@@ -100,6 +100,42 @@ public class CaptureActivity extends Activity {
         return watchdogMs;
     }
 
+    private void parseAndValidateOrFinish(Intent intent) {
+        if (intent == null) {
+            Stage2StatusWriter.write(this, "", false, "missing_intent", "", 0L);
+            finishAfterTransitionSafe();
+            return;
+        }
+        requestId = valueOrEmpty(intent.getStringExtra(EXTRA_REQUEST_ID));
+        String type = valueOrEmpty(intent.getStringExtra(EXTRA_TYPE));
+        String face = valueOrEmpty(intent.getStringExtra(EXTRA_FACE));
+        int duration = intent.getIntExtra(EXTRA_DURATION_SECONDS, 0);
+
+        boolean isDeleteShared = "delete_shared".equals(type);
+        boolean validType = "photo".equals(type)
+                || "video".equals(type)
+                || "audio".equals(type)
+                || "stage2".equals(type)
+                || isDeleteShared;
+        boolean validFace = "back".equals(face) || "front".equals(face);
+        boolean validDuration = duration >= 0 && duration <= 3600;
+        if ("audio".equals(type) || "video".equals(type)) {
+            validDuration = duration > 0 && duration <= 3600;
+        }
+        if (isDeleteShared) {
+            validDuration = duration == 0;
+            if (valueOrEmpty(intent.getStringExtra(EXTRA_SHARED_PATH)).isEmpty()) {
+                Stage2StatusWriter.write(this, requestId, false, "missing_shared_path", "", 0L);
+                finishAfterTransitionSafe();
+                return;
+            }
+        }
+        if (!validType || !validFace || !validDuration) {
+            Stage2StatusWriter.write(this, requestId, false, "invalid_arguments", "", 0L);
+            finishAfterTransitionSafe();
+        }
+    }
+
     private void startWhenAllowed() {
         String type = valueOrEmpty(getIntent().getStringExtra(EXTRA_TYPE));
         String[] required = requiredPermissionsForType(type);
@@ -111,6 +147,9 @@ public class CaptureActivity extends Activity {
     }
 
     private String[] requiredPermissionsForType(String type) {
+        if ("delete_shared".equals(type)) {
+            return new String[0];
+        }
         if ("photo".equals(type)) {
             return new String[]{Manifest.permission.CAMERA};
         }
@@ -222,3 +261,4 @@ public class CaptureActivity extends Activity {
         return s == null ? "" : s;
     }
 }
+
