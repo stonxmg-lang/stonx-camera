@@ -1,25 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Least-privilege manifest surface. Runtime requests stay narrower per command. -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-
-    <!-- Used only for the short-lived foreground-service notification on API 33+. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Short-lived foreground service only while recording; no permanent service. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
-    <!-- No MAIN/LAUNCHER activity anywhere in this manifest. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <application
         android:allowBackup="false"
         android:label="@string/app_name"
         android:supportsRtl="true">
 
-        <!-- Exported only because Termux starts it with an explicit am start intent. -->
         <activity
             android:name=".CaptureActivity"
             android:excludeFromRecents="true"
@@ -28,7 +25,6 @@
             android:noHistory="true"
             android:theme="@style/Theme.STONX.Transparent" />
 
-        <!-- Short-lived foreground service. The type is required by Android 14+ FGS rules. -->
         <service
             android:name=".RecordingForegroundService"
             android:enabled="true"
@@ -36,3 +32,4 @@
             android:foregroundServiceType="camera|microphone" />
     </application>
 </manifest>
+

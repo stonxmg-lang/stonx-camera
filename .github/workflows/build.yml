@@ -32,8 +32,6 @@ jobs:
         run: |
           set -euo pipefail
           SDK_MANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-
-          # yes can receive SIGPIPE after sdkmanager closes stdin; do not let pipefail fail this step.
           set +e +o pipefail
           yes | "$SDK_MANAGER" --licenses >/dev/null
           LICENSE_STATUS=${PIPESTATUS[1]}
@@ -41,8 +39,6 @@ jobs:
           if [ "$LICENSE_STATUS" -ne 0 ]; then
             exit "$LICENSE_STATUS"
           fi
-
-          # Do not use yes here: licenses are already accepted, and this must fail if install fails.
           "$SDK_MANAGER" "platforms;android-34" "build-tools;34.0.0" >/dev/null
 
       - name: Verify tool versions
@@ -89,7 +85,7 @@ jobs:
           "$AAPT2" dump badging "$APK_PATH"
           "$AAPT2" dump xmltree "$APK_PATH" --file AndroidManifest.xml
 
-      - name: Verify manifest policy for STONX stage 2
+      - name: Verify manifest policy for STONX
         shell: bash
         run: |
           set -euo pipefail
@@ -109,15 +105,12 @@ jobs:
           badging = subprocess.check_output([aapt2, 'dump', 'badging', apk], text=True)
           xml = subprocess.check_output([aapt2, 'dump', 'xmltree', apk, '--file', 'AndroidManifest.xml'], text=True)
 
-
           def fail(msg):
               print('MANIFEST_POLICY_FAIL:', msg)
               sys.exit(1)
 
-
           def leading_spaces(line):
               return len(line) - len(line.lstrip(' '))
-
 
           def element_blocks(text, marker):
               lines = text.splitlines()
@@ -125,11 +118,10 @@ jobs:
               i = 0
               while i < len(lines):
                   if lines[i].lstrip().startswith(marker + ' '):
-                      start_indent = leading_spaces(lines[i])
+                      indent = leading_spaces(lines[i])
                       j = i + 1
                       while j < len(lines):
-                          stripped = lines[j].lstrip()
-                          if stripped.startswith('E: ') and leading_spaces(lines[j]) <= start_indent:
+                          if lines[j].lstrip().startswith('E: ') and leading_spaces(lines[j]) <= indent:
                               break
                           j += 1
                       out.append('\n'.join(lines[i:j]))
@@ -137,7 +129,6 @@ jobs:
                   else:
                       i += 1
               return out
-
 
           def attr_bool(block, attr, expected):
               m = re.search(
@@ -152,33 +143,6 @@ jobs:
                   return word == expected
               value = int(m.group(3), 16)
               return value == (0xFFFFFFFF if expected == 'true' else 0)
-
-          def foreground_service_mask(block):
-              m = re.search(
-                  re.escape('android:foregroundServiceType') +
-                  r'(?:\([^)]*\))?\s*=\s*(?:\(type\s+0x[0-9A-Fa-f]+\)\s*)?(0x[0-9A-Fa-f]+)',
-                  block
-              )
-              if not m:
-                  return None
-              return int(m.group(1), 16)
-
-
-          def has_precise_launcher(text):
-              filters = element_blocks(text, 'E: intent-filter')
-              for block in filters:
-                  has_main = re.search(
-                      r'android:name(?:\([^)]*\))?\s*=\s*"android\.intent\.action\.MAIN"',
-                      block
-                  ) is not None
-                  has_launcher = re.search(
-                      r'android:name(?:\([^)]*\))?\s*=\s*"android\.intent\.category\.LAUNCHER"',
-                      block
-                  ) is not None
-                  if has_main and has_launcher:
-                      return True
-              return False
-
 
           activity_blocks = element_blocks(xml, 'E: activity')
           service_blocks = element_blocks(xml, 'E: service')
@@ -197,14 +161,6 @@ jobs:
           if not service_blocks:
               print('<missing>')
 
-          print('--- AAPT2 INTENT-FILTER BLOCKS ---')
-          filters = element_blocks(xml, 'E: intent-filter')
-          for idx, block in enumerate(filters, 1):
-              print('--- intent-filter %d ---' % idx)
-              print(block)
-          if not filters:
-              print('<none>')
-
           if len(activity_blocks) != 1:
               fail('expected exactly one activity block, found %d' % len(activity_blocks))
           if len(service_blocks) != 1:
@@ -216,16 +172,34 @@ jobs:
           if 'CaptureActivity' not in activity_block:
               fail('CaptureActivity name missing')
           if not attr_bool(activity_block, 'android:exported', 'true'):
-              fail('CaptureActivity exported=true not found in any supported aapt2 boolean form')
-          if has_precise_launcher(xml):
-              fail('launcher MAIN/LAUNCHER intent-filter is present')
+              fail('CaptureActivity exported=true not found in supported aapt2 boolean form')
+
+          filters = element_blocks(xml, 'E: intent-filter')
+          print('--- AAPT2 INTENT-FILTER BLOCKS ---')
+          for idx, block in enumerate(filters, 1):
+              print('--- intent-filter %d ---' % idx)
+              print(block)
+          if not filters:
+              print('<none>')
+          for block in filters:
+              has_main = re.search(r'android:name(?:\([^)]*\))?\s*=\s*"android\.intent\.action\.MAIN"', block) is not None
+              has_launcher = re.search(r'android:name(?:\([^)]*\))?\s*=\s*"android\.intent\.category\.LAUNCHER"', block) is not None
+              if has_main and has_launcher:
+                  fail('launcher MAIN/LAUNCHER intent-filter is present')
 
           if 'RecordingForegroundService' not in service_block:
               fail('RecordingForegroundService name missing')
           if not attr_bool(service_block, 'android:exported', 'false'):
-              fail('service exported=false not found in any supported aapt2 boolean form')
+              fail('service exported=false not found in supported aapt2 boolean form')
 
-          mask = foreground_service_mask(service_block)
+          mask = None
+          m = re.search(
+              re.escape('android:foregroundServiceType') +
+              r'(?:\([^)]*\))?\s*=\s*(?:\(type\s+0x[0-9A-Fa-f]+\)\s*)?(0x[0-9A-Fa-f]+)',
+              service_block
+          )
+          if m:
+              mask = int(m.group(1), 16)
           if mask is None:
               fail('service foregroundServiceType numeric mask not found')
           print('FOREGROUND_SERVICE_TYPE_MASK=0x%08x' % mask)
@@ -243,6 +217,8 @@ jobs:
               'android.permission.FOREGROUND_SERVICE',
               'android.permission.FOREGROUND_SERVICE_CAMERA',
               'android.permission.FOREGROUND_SERVICE_MICROPHONE',
+              'android.permission.WAKE_LOCK',
+              'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
           ]
           for permission in required_permissions:
               if "uses-permission: name='%s'" % permission not in badging:
@@ -273,3 +249,4 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
+

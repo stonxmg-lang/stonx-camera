@@ -8,6 +8,7 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.PowerManager;
 
 public class RecordingForegroundService extends Service {
     public static final String ACTION_STAGE2_DRY_RUN = "com.stonx.camera.bridge.action.STAGE2_DRY_RUN";
@@ -21,6 +22,8 @@ public class RecordingForegroundService extends Service {
     private static final int NOTIFICATION_ID = 2601;
     private static final String CHANNEL_ID = "stonx_temp_recording";
     private static final String CHANNEL_NAME = "Temporary STONX recording";
+
+    private PowerManager.WakeLock operationWakeLock;
 
     @Override
     public void onCreate() {
@@ -41,10 +44,12 @@ public class RecordingForegroundService extends Service {
             face = "back";
         }
 
-        boolean foregroundStarted = startForegroundForType(type, requestId);
+        boolean foregroundStarted = startForegroundForType(type, requestId, durationSeconds);
         if (!foregroundStarted) {
             return START_NOT_STICKY;
         }
+
+        writeOperationStarted(type, requestId);
 
         if ("photo".equals(type)) {
             startPhotoCapture(requestId, face);
@@ -69,9 +74,14 @@ public class RecordingForegroundService extends Service {
                 "simulated://stage2/" + safeRequestIdForPath(requestId),
                 0L
         );
-        sendDone(requestId);
         removeNotificationAndStop(true);
         return START_NOT_STICKY;
+    }
+
+    @Override
+    public void onDestroy() {
+        releaseWakeLockSafely();
+        super.onDestroy();
     }
 
     @Override
@@ -79,7 +89,7 @@ public class RecordingForegroundService extends Service {
         return null;
     }
 
-    private boolean startForegroundForType(String type, String requestId) {
+    private boolean startForegroundForType(String type, String requestId, int durationSeconds) {
         try {
             Notification notification = buildNotification(type, requestId);
             if (Build.VERSION.SDK_INT >= 29) {
@@ -87,6 +97,7 @@ public class RecordingForegroundService extends Service {
             } else {
                 startForeground(NOTIFICATION_ID, notification);
             }
+            acquireOperationWakeLock(type, durationSeconds);
             return true;
         } catch (SecurityException e) {
             Stage2StatusWriter.write(this, requestId, false, "foreground_service_permission_denied", "", 0L);
@@ -100,7 +111,6 @@ public class RecordingForegroundService extends Service {
                     0L
             );
         }
-        sendDone(requestId);
         removeNotificationAndStop(false);
         return false;
     }
@@ -117,6 +127,54 @@ public class RecordingForegroundService extends Service {
         }
         return ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
                 | ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+    }
+
+    private void acquireOperationWakeLock(String type, int durationSeconds) {
+        try {
+            long timeoutMs;
+            if ("photo".equals(type)) {
+                timeoutMs = 60000L;
+            } else if ("audio".equals(type) || "video".equals(type)) {
+                timeoutMs = durationSeconds * 1000L + 30000L;
+            } else {
+                timeoutMs = 30000L;
+            }
+            if (timeoutMs > 3650000L) {
+                timeoutMs = 3650000L;
+            }
+
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            if (pm == null) {
+                return;
+            }
+            operationWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "stonx:operation");
+            operationWakeLock.setReferenceCounted(false);
+            operationWakeLock.acquire(timeoutMs);
+        } catch (Throwable ignored) {
+            operationWakeLock = null;
+        }
+    }
+
+    private void releaseWakeLockSafely() {
+        try {
+            if (operationWakeLock != null && operationWakeLock.isHeld()) {
+                operationWakeLock.release();
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            operationWakeLock = null;
+        }
+    }
+
+    private void writeOperationStarted(String type, String requestId) {
+        Stage2StatusWriter.write(
+                this,
+                requestId,
+                true,
+                "operation_started",
+                "pending://" + type + "/" + safeRequestIdForPath(requestId),
+                0L
+        );
     }
 
     private void startPhotoCapture(final String requestId, String face) {
@@ -142,7 +200,6 @@ public class RecordingForegroundService extends Service {
                         exposureNs,
                         iso
                 );
-                sendDone(requestId);
                 removeNotificationAndStop(true);
             }
 
@@ -156,7 +213,6 @@ public class RecordingForegroundService extends Service {
                         "",
                         0L
                 );
-                sendDone(requestId);
                 removeNotificationAndStop(true);
             }
         });
@@ -165,7 +221,6 @@ public class RecordingForegroundService extends Service {
     private void startAudioCapture(final String requestId, int durationSeconds) {
         if (durationSeconds <= 0 || durationSeconds > 3600) {
             Stage2StatusWriter.write(this, requestId, false, "invalid_duration", "", 0L);
-            sendDone(requestId);
             removeNotificationAndStop(true);
             return;
         }
@@ -187,7 +242,6 @@ public class RecordingForegroundService extends Service {
                         durationMs,
                         signalLevel
                 );
-                sendDone(requestId);
                 removeNotificationAndStop(true);
             }
 
@@ -201,7 +255,6 @@ public class RecordingForegroundService extends Service {
                         "",
                         0L
                 );
-                sendDone(requestId);
                 removeNotificationAndStop(true);
             }
         });
@@ -210,7 +263,6 @@ public class RecordingForegroundService extends Service {
     private void startVideoCapture(final String requestId, String face, int durationSeconds) {
         if (durationSeconds <= 0 || durationSeconds > 3600) {
             Stage2StatusWriter.write(this, requestId, false, "invalid_duration", "", 0L);
-            sendDone(requestId);
             removeNotificationAndStop(true);
             return;
         }
@@ -244,7 +296,6 @@ public class RecordingForegroundService extends Service {
                         width,
                         height
                 );
-                sendDone(requestId);
                 removeNotificationAndStop(true);
             }
 
@@ -258,7 +309,6 @@ public class RecordingForegroundService extends Service {
                         "",
                         0L
                 );
-                sendDone(requestId);
                 removeNotificationAndStop(true);
             }
         });
@@ -306,19 +356,13 @@ public class RecordingForegroundService extends Service {
                 .build();
     }
 
-    private void sendDone(String requestId) {
-        Intent done = new Intent(CaptureActivity.ACTION_STAGE2_DONE);
-        done.setPackage(getPackageName());
-        done.putExtra(EXTRA_REQUEST_ID, requestId == null ? "" : requestId);
-        sendBroadcast(done);
-    }
-
     private void removeNotificationAndStop(boolean foregroundStarted) {
         try {
             if (foregroundStarted) {
                 stopForeground(true);
             }
         } finally {
+            releaseWakeLockSafely();
             stopSelf();
         }
     }
